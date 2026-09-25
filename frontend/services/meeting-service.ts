@@ -1,6 +1,7 @@
-import type { ApiMeeting, ApiMeetingList, ApiParticipant } from "@/lib/api-types";
+import type { ApiMeeting, ApiMeetingList, ApiParticipant, ApiSignalingTicket } from "@/lib/api-types";
 import { apiRequest, ApiError } from "./api";
 import { normalizeUser } from "@/services/auth-service";
+import type { SignalingTicket } from "@/lib/signaling";
 import type { CreateMeetingInput, Meeting, MeetingListResponse, MeetingStatus, Participant } from "@/lib/types";
 
 function initialsFor(name: string) {
@@ -143,6 +144,28 @@ export const meetingService = {
       method: "PATCH",
       body: JSON.stringify(state),
     });
+  },
+
+  /**
+   * Trade the authenticated session for a short-lived signaling credential.
+   *
+   * The session cookie is first-party and cannot be sent on a cross-origin
+   * WebSocket handshake, so the API issues a signed ticket instead. TURN
+   * credentials come back in this response rather than in the bundle, which
+   * keeps a permanent TURN secret off the client.
+   */
+  async createSignalingTicket(meetingId: string): Promise<SignalingTicket> {
+    const raw = await apiRequest<ApiSignalingTicket>(
+      `/meetings/${encodeURIComponent(meetingId)}/ws-ticket`,
+      { method: "POST" },
+    );
+    return {
+      ticket: raw.ticket,
+      wsUrl: raw.ws_url,
+      expiresIn: raw.expires_in,
+      iceServers: (raw.ice_servers ?? []) as SignalingTicket["iceServers"],
+      maxParticipants: raw.max_participants,
+    };
   },
 
   async setParticipantMute(meetingId: string, participantId: string, muted: boolean): Promise<Participant> {

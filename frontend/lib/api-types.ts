@@ -77,3 +77,11 @@ export type ApiMeetingList = {
   meetings?: ApiMeeting[];
   total?: number;
 };
+
+export type ApiSignalingTicket = {
+  ticket: string;
+  ws_url: string;
+  expires_in: number;
+  ice_servers?: RTCIceServer[] | null;
+  max_participants: number;
+};

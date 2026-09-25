@@ -1,20 +1,22 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useRouter } from "next/navigation";
-import { ArrowLeft, Camera, CameraOff, Copy, Info, Mic, MicOff, PhoneOff, ShieldCheck, Square, UsersRound, Video } from "lucide-react";
-import { Avatar } from "@/components/ui/avatar";
+import { ArrowLeft, Camera, CameraOff, Copy, Mic, MicOff, PhoneOff, ShieldCheck, Square, UsersRound, Video } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { LoadingState } from "@/components/ui/loading";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import { ParticipantPanel } from "@/components/room/participant-panel";
 import { LocalVideo } from "@/components/room/local-video";
+import { VideoTile } from "@/components/room/video-tile";
 import { PrejoinScreen } from "@/components/room/prejoin-screen";
 import { useLocalMedia } from "@/hooks/use-local-media";
 import { useMeeting } from "@/hooks/use-meeting";
+import { useWebRTCMeeting } from "@/hooks/use-webrtc-meeting";
 import { meetingService } from "@/services/meeting-service";
 import { ApiError } from "@/services/api";
 import { formatMeetingRange } from "@/lib/date";
+import { SIGNALING_STATUS_TEXT, type RemoteParticipant } from "@/lib/signaling";
 import { useAuth } from "@/providers/auth-provider";
 import type { Meeting, Participant } from "@/lib/types";
 
@@ -44,6 +46,35 @@ export function MeetingRoom({ meetingId }: { meetingId: string }) {
   const joinedRef = useRef(false);
   const leaveSentRef = useRef(false);
   const wasInActiveListRef = useRef(false);
+  // Keep the newest signaling state in a ref so the local toggle handlers and
+  // the room's REST call can never disagree about what peers were told.
+  const publishMediaStateRef = useRef<((state: { audioEnabled: boolean; videoEnabled: boolean; screenSharing?: boolean }) => void) | null>(null);
+  const webrtcEnabled = phase === "room" && !endedByHost && !removedByHost && (roomMeeting?.status ?? meeting?.status) !== "ended";
+  const webrtc = useWebRTCMeeting({
+    meetingId,
+    enabled: webrtcEnabled,
+    localStream: media.stream,
+    onHostMuteChange: (muted) => {
+      // The server pushed a host mute over the socket, so mirror it into local
+      // state instead of letting the next toggle silently re-enable the track.
+      media.setMicEnabled(!muted);
+    },
+    onRemoved: () => {
+      setRemovedByHost(true);
+      media.stop();
+    },
+    onEnded: () => {
+      setEndedByHost(true);
+      media.stop();
+    },
+    onError: (message) => setRoomError(message),
+  });
+  publishMediaStateRef.current = webrtc.publishMediaState;
+  const remoteStreams = useMemo(() => {
+    const map = new Map<string, RemoteParticipant>();
+    for (const remote of webrtc.remoteParticipants) map.set(remote.userId, remote);
+    return map;
+  }, [webrtc.remoteParticipants]);
   const leaveRoom = useCallback(async () => {
     if (joinedRef.current && !leaveSentRef.current) {
       leaveSentRef.current = true;
@@ -155,10 +186,15 @@ export function MeetingRoom({ meetingId }: { meetingId: string }) {
   async function startMedia() {
     const stream = await media.start();
     if (joinedRef.current && stream) {
+      const audioEnabled = stream.getAudioTracks().some((track) => track.enabled);
+      const videoEnabled = stream.getVideoTracks().some((track) => track.enabled);
+      // Devices can be granted after the room is joined, so peers need to be
+      // told the moment real tracks start flowing.
+      publishMediaStateRef.current?.({ audioEnabled, videoEnabled });
       try {
         await meetingService.updateMediaState(meetingId, {
-          audio_enabled: stream.getAudioTracks().some((track) => track.enabled),
-          video_enabled: stream.getVideoTracks().some((track) => track.enabled),
+          audio_enabled: audioEnabled,
+          video_enabled: videoEnabled,
         });
       } catch {
         setRoomError("Your media started, but its status could not be synced.");
@@ -168,13 +204,25 @@ export function MeetingRoom({ meetingId }: { meetingId: string }) {
 
   async function toggleMicrophone() {
     if (removedByHost) return;
+    if (webrtc.mutedByHost) {
+      setRoomError("The host has muted you. Ask them to unmute you before turning your microphone on.");
+      return;
+    }
     const nextEnabled = !media.micEnabled;
     media.toggleMic();
+    publishMediaStateRef.current?.({
+      audioEnabled: nextEnabled,
+      videoEnabled: media.cameraEnabled,
+    });
     if (!joinedRef.current) return;
     try {
       await meetingService.updateMediaState(meetingId, { audio_enabled: nextEnabled });
     } catch (requestError) {
       media.toggleMic();
+      publishMediaStateRef.current?.({
+        audioEnabled: !nextEnabled,
+        videoEnabled: media.cameraEnabled,
+      });
       handleRequestError(requestError, "Your microphone could not be updated for everyone.");
     }
   }
@@ -183,11 +231,19 @@ export function MeetingRoom({ meetingId }: { meetingId: string }) {
     if (removedByHost) return;
     const nextEnabled = !media.cameraEnabled;
     media.toggleCamera();
+    publishMediaStateRef.current?.({
+      audioEnabled: media.micEnabled,
+      videoEnabled: nextEnabled,
+    });
     if (!joinedRef.current) return;
     try {
       await meetingService.updateMediaState(meetingId, { video_enabled: nextEnabled });
     } catch (requestError) {
       media.toggleCamera();
+      publishMediaStateRef.current?.({
+        audioEnabled: media.micEnabled,
+        videoEnabled: !nextEnabled,
+      });
       handleRequestError(requestError, "Your camera could not be updated for everyone.");
     }
   }
@@ -310,6 +366,7 @@ export function MeetingRoom({ meetingId }: { meetingId: string }) {
             </button>
           </div>
         ) : null}
+        {webrtc.mutedByHost && !roomIsClosed && !removedByHost ? <div className="mb-4 rounded-xl border border-coral/30 bg-coral/10 px-4 py-3 text-sm text-white/80" role="status">The host has muted your microphone. Ask them to unmute you to speak.</div> : null}
         {roomError && !roomIsClosed && !removedByHost ? <div className="mb-4 flex items-center justify-between gap-3 rounded-xl border border-[#f5b544]/30 bg-[#f5b544]/10 px-4 py-3 text-sm text-[#ffe5a0]" role="alert"><span>{roomError}</span><button type="button" className="font-semibold underline" onClick={() => setRoomError(null)}>Dismiss</button></div> : null}
         <div className="relative flex min-h-[480px] flex-1 overflow-hidden rounded-2xl border border-white/10 bg-[#2d3136] p-2 shadow-2xl sm:p-3">
           <div className="grid min-h-0 flex-1 gap-2 lg:grid-cols-[minmax(0,1fr)_250px]">
@@ -317,11 +374,27 @@ export function MeetingRoom({ meetingId }: { meetingId: string }) {
               <LocalVideo stream={media.stream} className="h-full w-full object-cover" ariaLabel="Your video" />
               {!media.stream || !media.cameraEnabled ? <div className="absolute inset-0 flex flex-col items-center justify-center bg-[#181a1d]"><span className="flex h-24 w-24 items-center justify-center rounded-full bg-mint text-3xl font-bold text-white">{user.initials}</span><p className="mt-4 text-sm font-bold text-white/80">{!media.stream ? "Camera unavailable" : "Your camera is off"}</p><p className="mt-1 text-xs text-white/40">{!media.stream ? "You can still stay in the room with audio." : "Turn it back on whenever you’re ready."}</p></div> : null}
               <div className="absolute bottom-4 left-4 flex items-center gap-2 rounded-lg bg-black/40 px-3 py-2 text-xs font-semibold backdrop-blur"><span className="h-1.5 w-1.5 rounded-full bg-mint" />{user.name} <span className="font-normal text-white/50">(you)</span></div>
-              <div className="absolute right-4 top-4 flex items-center gap-2 rounded-lg bg-black/30 px-3 py-2 text-[11px] font-semibold text-white/70 backdrop-blur"><ShieldCheck className="h-3.5 w-3.5 text-mint" aria-hidden="true" />Local media controls</div>
+              <div className="absolute right-4 top-4 flex items-center gap-2 rounded-lg bg-black/30 px-3 py-2 text-[11px] font-semibold text-white/70 backdrop-blur"><ShieldCheck className="h-3.5 w-3.5 text-mint" aria-hidden="true" />Your camera</div>
             </div>
             <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-1">
-              {remoteParticipants.slice(0, 3).map((participant, index) => <div key={participant.id} className="relative flex min-h-[140px] items-center justify-center overflow-hidden rounded-xl bg-[#3b4046]"><div className="absolute inset-0 room-grid opacity-20" /><Avatar initials={participant.initials} name={participant.name} size="lg" tone={index % 2 ? "lilac" : "coral"} /><div className="absolute bottom-3 left-3 flex items-center gap-2 text-xs font-semibold text-white/75"><span className="h-1.5 w-1.5 rounded-full bg-mint" />{participant.name}</div><span className="absolute right-3 top-3 rounded-full bg-black/25 px-2 py-1 text-[9px] font-semibold text-white/45">Video preview</span></div>)}
-              <div className="col-span-2 flex min-h-[140px] flex-col items-center justify-center rounded-xl border border-dashed border-white/10 bg-white/[0.02] p-4 text-center lg:col-span-1"><span className="flex h-10 w-10 items-center justify-center rounded-xl bg-white/[0.08] text-white/45"><UsersRound className="h-5 w-5" aria-hidden="true" /></span><p className="mt-3 text-xs font-semibold text-white/65">{remoteParticipants.length ? "More participants" : "Waiting for others"}</p><p className="mt-1 text-[10px] leading-4 text-white/35">Remote video is not connected in this preview.</p></div>
+              {remoteParticipants.slice(0, 3).map((participant, index) => {
+                const remote = remoteStreams.get(participant.userId);
+                return (
+                  <VideoTile
+                    key={participant.id}
+                    stream={remote?.stream ?? null}
+                    name={participant.name}
+                    initials={participant.initials}
+                    audioEnabled={remote?.audioEnabled ?? participant.audioEnabled}
+                    videoEnabled={remote?.videoEnabled ?? participant.videoEnabled}
+                    isHost={participant.role === "host"}
+                    labelSuffix={remote ? undefined : "Connecting…"}
+                    tone={index % 2 ? "lilac" : "coral"}
+                    className="min-h-[140px] w-full"
+                  />
+                );
+              })}
+              <div className="col-span-2 flex min-h-[140px] flex-col items-center justify-center rounded-xl border border-dashed border-white/10 bg-white/[0.02] p-4 text-center lg:col-span-1"><span className="flex h-10 w-10 items-center justify-center rounded-xl bg-white/[0.08] text-white/45"><UsersRound className="h-5 w-5" aria-hidden="true" /></span><p className="mt-3 text-xs font-semibold text-white/65">{remoteParticipants.length ? "More participants" : "Waiting for others"}</p><p className="mt-1 text-[10px] leading-4 text-white/35">{remoteParticipants.length ? "Open the participants panel to see everyone in this room." : "Share the meeting link. Media connects directly between browsers."}</p></div>
             </div>
           </div>
         </div>
@@ -334,10 +407,15 @@ export function MeetingRoom({ meetingId }: { meetingId: string }) {
             {isHost && !roomIsClosed ? <RoomControl label="End for all" active={false} danger disabled={isEnding} onClick={() => setEndDialogOpen(true)}><Square className="h-4 w-4" aria-hidden="true" /></RoomControl> : null}
           </div>
           <RoomControl label="Leave" active={false} danger onClick={() => void leaveRoom()}><PhoneOff className="h-5 w-5" aria-hidden="true" /></RoomControl>
-          <div className="hidden items-center gap-2 text-xs text-white/40 sm:flex"><Info className="h-4 w-4" aria-hidden="true" />Camera and mic controls work locally</div>
+          <div className="hidden items-center gap-2 text-xs text-white/40 sm:flex" data-testid="webrtc-status"><span className={`h-1.5 w-1.5 rounded-full ${webrtc.status === "connected" ? "bg-mint" : webrtc.status === "failed" ? "bg-coral" : "bg-[#f5b544]"}`} />{SIGNALING_STATUS_TEXT[webrtc.status]} · {webrtc.peerCount} peer{webrtc.peerCount === 1 ? "" : "s"}</div>
         </div>
         <ParticipantPanel
           participants={onlineParticipants}
+          remoteStreams={remoteStreams}
+          localStream={media.stream}
+          localUserId={user.id}
+          localAudioEnabled={media.micEnabled}
+          localVideoEnabled={media.cameraEnabled}
           open={panelOpen}
           canManageParticipants={isHost && !roomIsClosed}
           pendingParticipantId={pendingParticipantId}

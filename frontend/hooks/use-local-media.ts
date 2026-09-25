@@ -221,9 +221,23 @@ export function useLocalMedia() {
     setState((current) => ({ ...current, cameraEnabled: nextEnabled }));
   }, [state.cameraEnabled]);
 
+  /**
+   * Sets an explicit state instead of toggling it. A host mute is pushed from
+   * the server, so calling a toggle here could re-enable a track the host just
+   * disabled.
+   */
+  const setMicEnabled = useCallback((enabled: boolean) => {
+    const stream = streamRef.current;
+    if (!stream) return;
+    stream.getAudioTracks().forEach((track) => {
+      track.enabled = enabled;
+    });
+    setState((current) => ({ ...current, micEnabled: enabled }));
+  }, []);
+
   useEffect(() => () => {
     streamRef.current?.getTracks().forEach((track) => track.stop());
   }, []);
 
-  return { ...state, start, stop, toggleMic, toggleCamera, refreshPermission };
+  return { ...state, start, stop, toggleMic, toggleCamera, setMicEnabled, refreshPermission };
 }

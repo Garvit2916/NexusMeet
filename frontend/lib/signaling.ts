@@ -1,0 +1,95 @@
+/**
+ * Types and pure helpers for the WebRTC signaling layer.
+ *
+ * Media never travels through these messages: the socket only carries SDP, ICE
+ * candidates, and media state so peers can attach directly to each other.
+ */
+
+export type IceServer = {
+  urls: string | string[];
+  username?: string;
+  credential?: string;
+};
+
+export type SignalingTicket = {
+  ticket: string;
+  wsUrl: string;
+  expiresIn: number;
+  iceServers: IceServer[];
+  maxParticipants: number;
+};
+
+/** A peer as described by the signaling server, before any media flows. */
+export type SignalingPeer = {
+  connectionId: string;
+  userId: string;
+  participantId: number;
+  name: string;
+  isHost: boolean;
+  audioEnabled: boolean;
+  videoEnabled: boolean;
+  screenSharing: boolean;
+};
+
+export type SignalingStatus =
+  | "idle"
+  | "connecting"
+  | "connected"
+  | "reconnecting"
+  | "closed"
+  | "failed";
+
+/** A remote participant with the live media the browser negotiated for it. */
+export type RemoteParticipant = SignalingPeer & {
+  stream: MediaStream | null;
+  connectionState: RTCPeerConnectionState;
+};
+
+export type MediaStateUpdate = {
+  audioEnabled: boolean;
+  videoEnabled: boolean;
+  screenSharing?: boolean;
+};
+
+export const SIGNALING_ERROR_MESSAGES: Record<string, string> = {
+  UNKNOWN_TARGET: "A participant left before that message could be delivered.",
+  INVALID_MESSAGE: "The signaling server rejected a message from this browser.",
+};
+
+export const SIGNALING_STATUS_TEXT: Record<SignalingStatus, string> = {
+  idle: "Not connected",
+  connecting: "Connecting media…",
+  connected: "Media connected",
+  reconnecting: "Reconnecting…",
+  closed: "Disconnected",
+  failed: "Media connection failed",
+};
+
+/**
+ * Decide which side of a pair creates the offer.
+ *
+ * Both browsers compare the same two connection ids, so exactly one offers and
+ * the pair never has to resolve glare. Ties are impossible because a
+ * connection id is unique per socket.
+ */
+export function shouldInitiateOffer(selfConnectionId: string, peerConnectionId: string): boolean {
+  return selfConnectionId < peerConnectionId;
+}
+
+export function buildSocketUrl(wsUrl: string, ticket: string): string {
+  const url = new URL(wsUrl);
+  url.searchParams.set("ticket", ticket);
+  return url.toString();
+}
+
+/** STUN/TURN servers from the ticket, falling back to build-time configuration. */
+export function resolveIceServers(
+  ticketServers: IceServer[] | undefined,
+  fallbackUrls: string[] = [],
+): RTCIceServer[] {
+  const fromTicket = (ticketServers ?? []).filter((server) =>
+    Array.isArray(server.urls) ? server.urls.length > 0 : Boolean(server.urls),
+  );
+  const fromEnv = fallbackUrls.filter(Boolean).map((url) => ({ urls: url }));
+  return [...fromTicket, ...fromEnv] as RTCIceServer[];
+}
