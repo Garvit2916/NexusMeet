@@ -40,3 +40,34 @@ services:
         value: demo@nexusmeet.app
       - key: DEFAULT_USER_PASSWORD
         sync: false
+      # --- Real-time media (WebRTC signaling) ---------------------------------
+      # Signs the short-lived tickets that authorize a WebSocket handshake.
+      # Generate with: python -c "import secrets; print(secrets.token_urlsafe(48))"
+      # Until this is set, /ws-ticket answers 503 SIGNALING_NOT_CONFIGURED in
+      # production, so media stays off instead of running on a forgeable key.
+      - key: WS_TICKET_SECRET
+        sync: false
+      # Must be the externally reachable ws:// or wss:// origin of THIS service.
+      # Browsers cannot follow the Vercel REST rewrite for a WebSocket upgrade,
+      # so the ticket has to point at Render directly. Use wss:// in production.
+      - key: PUBLIC_WS_URL
+        value: wss://nexusmeet-api.onrender.com
+      # Full mesh is peer-to-peer, so this is a room capacity guard, not a
+      # server media limit. Each additional participant adds one connection to
+      # every browser, so keep it modest.
+      - key: MAX_WEBRTC_PARTICIPANTS
+        value: "6"
+      - key: WS_TICKET_TTL_SECONDS
+        value: "60"
+      - key: STUN_URLS
+        value: stun:stun.l.google.com:19302,stun:stun1.l.google.com:19302
+      # TURN is what makes media work behind symmetric NAT and restrictive
+      # firewalls. Leave TURN_URL empty to run STUN-only, but real-world
+      # connectivity is then not guaranteed. Credentials are issued to clients
+      # through the authenticated ticket endpoint and are never bundled.
+      - key: TURN_URL
+        sync: false
+      - key: TURN_USERNAME
+        sync: false
+      - key: TURN_CREDENTIAL
+        sync: false

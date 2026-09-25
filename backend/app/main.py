@@ -1,3 +1,4 @@
+import asyncio
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from uuid import uuid4
@@ -13,6 +14,7 @@ from app.core.errors import register_exception_handlers
 from app.db.init_db import initialize_database
 from app.db.seed import seed_database
 from app.db.session import Database
+from app.realtime.router import router as signaling_router
 
 __all__ = ["app", "create_app"]
 
@@ -52,6 +54,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         incoming_request_id = request.headers.get(app_settings.request_id_header, "").strip()
         request_id = incoming_request_id[:128] or uuid4().hex
         request.state.request_id = request_id
+        # Synchronous endpoints notify the async signaling hub from a worker
+        # thread, so record the loop serving this request for them to hand off to.
+        request.state.event_loop = asyncio.get_running_loop()
         response = await call_next(request)
         response.headers[app_settings.request_id_header] = request_id
         return response
@@ -68,6 +73,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     register_exception_handlers(application)
     application.include_router(health_router)
     application.include_router(api_v1_router, prefix=app_settings.api_v1_prefix)
+    # The signaling socket lives outside the versioned REST prefix: it is a
+    # long-lived upgrade, not a resource under /api/v1.
+    application.include_router(signaling_router)
     return application
 
 

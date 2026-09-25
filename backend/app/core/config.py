@@ -32,6 +32,37 @@ class Settings(BaseSettings):
     session_cookie_secure: bool | None = None
     session_cookie_samesite: str = "lax"
     request_id_header: str = "X-Request-ID"
+    # WebRTC signaling. The ticket secret signs the short-lived credential the
+    # browser presents on the WebSocket handshake, so a session cookie never has
+    # to be sent cross-origin. Generate a real value for any shared deployment.
+    ws_ticket_secret: str = "nexusmeet-development-ws-secret"
+    ws_ticket_ttl_seconds: int = 120
+    max_webrtc_participants: int = 6
+    # Public origin the browser should use for wss://. Requests that arrive
+    # through the frontend proxy carry the proxy host, so the deployed value is
+    # configured explicitly instead of being derived from the request.
+    public_ws_url: str | None = None
+    stun_urls: str = "stun:stun.l.google.com:19302"
+    # TURN is optional. These values stay on the server and are handed to the
+    # browser only inside the signed ticket response, so a permanent TURN
+    # credential is never committed to the frontend bundle.
+    turn_url: str | None = None
+    turn_username: str | None = None
+    turn_credential: str | None = None
+
+    @field_validator("ws_ticket_secret", mode="before")
+    @classmethod
+    def blank_ws_secret_uses_development_default(cls, value: Any) -> Any:
+        """Treat a blank environment value as unset.
+
+        Deployment dashboards submit an empty string for optional variables that
+        were never filled in, and an empty HMAC key would make every ticket
+        forgeable. Falling back to the development default keeps the service
+        bootable while `is_production` still flags the misconfiguration.
+        """
+        if isinstance(value, str) and not value.strip():
+            return "nexusmeet-development-ws-secret"
+        return value
 
     @field_validator("session_cookie_secure", mode="before")
     @classmethod
@@ -50,6 +81,18 @@ class Settings(BaseSettings):
     @property
     def cors_origin_list(self) -> list[str]:
         return [origin.strip() for origin in self.cors_origins.split(",") if origin.strip()]
+
+    @property
+    def stun_url_list(self) -> list[str]:
+        return [url.strip() for url in self.stun_urls.split(",") if url.strip()]
+
+    @property
+    def has_turn_credentials(self) -> bool:
+        return bool(self.turn_url and self.turn_username and self.turn_credential)
+
+    @property
+    def uses_development_ws_secret(self) -> bool:
+        return self.ws_ticket_secret == "nexusmeet-development-ws-secret"
 
     @property
     def is_production(self) -> bool:

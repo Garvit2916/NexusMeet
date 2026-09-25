@@ -316,6 +316,12 @@ class MeetingService:
         self._require_host(meeting, user)
         return meeting
 
+    def require_access(
+        self, meeting_id: str, user_id: str
+    ) -> tuple[Meeting, MeetingParticipant | None]:
+        """Public access check for callers outside this service, such as signaling."""
+        return self._require_access(meeting_id, user_id)
+
     def mute_participant(
         self,
         meeting_id: str,
