@@ -15,6 +15,10 @@ services:
     startCommand: cd backend && alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port $PORT
     healthCheckPath: /health
     envVars:
+      # Pinned to the version the backend is tested on. Render's default
+      # (newer) Python has no prebuilt wheels for every pinned dependency.
+      - key: PYTHON_VERSION
+        value: 3.11.9
       # Ephemeral by design on the free plan. For the starter plan use the
       # persistent disk instead: sqlite:////data/nexusmeet.db
       - key: DATABASE_URL
