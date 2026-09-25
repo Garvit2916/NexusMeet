@@ -76,7 +76,7 @@ Remaining gaps are deliberate and documented: no password reset, email verificat
 6. As the host, open the participant panel, mute the participant, then remove them; the removed participant sees a notice in their room.
 7. As the host, use **End for all**, confirm the dialog, and observe the meeting close for both windows.
 8. Sign out and confirm `/dashboard` redirects to `/login`.
-9. Create a scheduled meeting, copy its invite, and inspect the meeting details and calendar download.
+9. Create a scheduled meeting, copy its invite, and add the event to Google Calendar, Outlook, or a downloaded `.ics` file.
 10. Join after the scheduled time to see the automatic live transition.
 11. Run the backend and frontend verification commands listed in the README.
 

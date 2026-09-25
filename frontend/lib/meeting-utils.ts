@@ -50,37 +50,3 @@ export function meetingCodeFromLink(value: string) {
 export function buildJoinUrl(origin: string, meetingId: string) {
   return `${origin.replace(/\/$/, "")}/meeting/${encodeURIComponent(meetingId)}`;
 }
-
-export function buildCalendarFile({
-  title,
-  description,
-  startTime,
-  endTime,
-  joinUrl,
-}: {
-  title: string;
-  description: string;
-  startTime: string;
-  endTime: string;
-  joinUrl: string;
-}) {
-  const format = (value: string) => new Date(value).toISOString().replace(/[-:]/g, "").replace(/\.\d{3}Z$/, "Z");
-  const escape = (value: string) => value.replace(/([,;])/g, "\\$1").replace(/\n/g, "\\n");
-  const createId = () => typeof crypto !== "undefined" && typeof crypto.randomUUID === "function" ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
-  return [
-    "BEGIN:VCALENDAR",
-    "VERSION:2.0",
-    "PRODID:-//NexusMeet//EN",
-    "CALSCALE:GREGORIAN",
-    "BEGIN:VEVENT",
-    `UID:${createId()}@nexusmeet.local`,
-    `DTSTAMP:${format(new Date().toISOString())}`,
-    `DTSTART:${format(startTime)}`,
-    `DTEND:${format(endTime)}`,
-    `SUMMARY:${escape(title)}`,
-    `DESCRIPTION:${escape(`${description}\n\nJoin: ${joinUrl}`)}`,
-    `URL:${joinUrl}`,
-    "END:VEVENT",
-    "END:VCALENDAR",
-  ].join("\r\n");
-}

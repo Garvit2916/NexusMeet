@@ -12,6 +12,7 @@ NexusMeet is a calm, full-stack meeting workspace built around instant rooms, sc
 - Scheduled meetings with duration, timezone, description, and invite emails
 - Meeting links and `NM-XXXXXXXX` codes
 - Public meeting details and invite-link copying
+- Calendar integration: Google Calendar and Outlook prefilled event links, plus a standards-compliant `.ics` download with a stable UID, organizer, and a ten-minute reminder
 - Pre-join camera and microphone preview
 - Permission-aware local media with graceful camera/microphone fallbacks
 - Persisted join, leave, and media-state updates
