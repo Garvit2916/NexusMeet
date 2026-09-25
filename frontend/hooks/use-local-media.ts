@@ -26,6 +26,37 @@ function messageFor(error: unknown, fallback: string) {
   return fallback;
 }
 
+const DEVICE_CHECK_TIMEOUT_MS = 15000;
+
+const PERMISSION_PROMPT_TIMEOUT_MESSAGE =
+  "Camera and microphone access timed out. Allow camera and microphone for this site in your browser, then check your devices again.";
+
+function isPermissionTimeout(error: unknown) {
+  return error instanceof DOMException && error.name === "TimeoutError";
+}
+
+function requestDevices(constraints: MediaStreamConstraints): Promise<MediaStream> {
+  const request = navigator.mediaDevices.getUserMedia(constraints);
+  return new Promise<MediaStream>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      request
+        .then((granted) => granted.getTracks().forEach((track) => track.stop()))
+        .catch(() => undefined);
+      reject(new DOMException("Device access timed out", "TimeoutError"));
+    }, DEVICE_CHECK_TIMEOUT_MS);
+    request.then(
+      (granted) => {
+        clearTimeout(timer);
+        resolve(granted);
+      },
+      (error) => {
+        clearTimeout(timer);
+        reject(error);
+      },
+    );
+  });
+}
+
 export function useLocalMedia() {
   const [state, setState] = useState<LocalMediaState>(initialState);
   const streamRef = useRef<MediaStream | null>(null);
@@ -47,7 +78,7 @@ export function useLocalMedia() {
     streamRef.current = null;
 
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({
+      const stream = await requestDevices({
         video: { width: { ideal: 1280 }, height: { ideal: 720 }, facingMode: "user" },
         audio: { echoCancellation: true, noiseSuppression: true },
       });
@@ -62,17 +93,30 @@ export function useLocalMedia() {
       }));
       return stream;
     } catch (combinedError) {
+      if (isPermissionTimeout(combinedError)) {
+        streamRef.current = null;
+        setState((current) => ({ ...current, isStarting: false, stream: null, micEnabled: false, cameraEnabled: false, error: PERMISSION_PROMPT_TIMEOUT_MESSAGE }));
+        return null;
+      }
       const warnings: string[] = [];
       let videoStream: MediaStream | null = null;
       let audioStream: MediaStream | null = null;
       try {
-        videoStream = await navigator.mediaDevices.getUserMedia({ video: { width: { ideal: 1280 }, height: { ideal: 720 }, facingMode: "user" } });
+        videoStream = await requestDevices({ video: { width: { ideal: 1280 }, height: { ideal: 720 }, facingMode: "user" } });
       } catch (error) {
+        if (isPermissionTimeout(error)) {
+          setState((current) => ({ ...current, isStarting: false, stream: null, micEnabled: false, cameraEnabled: false, error: PERMISSION_PROMPT_TIMEOUT_MESSAGE }));
+          return null;
+        }
         warnings.push(messageFor(error, "Camera access was blocked. You can continue without video."));
       }
       try {
-        audioStream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true } });
+        audioStream = await requestDevices({ audio: { echoCancellation: true, noiseSuppression: true } });
       } catch (error) {
+        if (isPermissionTimeout(error)) {
+          setState((current) => ({ ...current, isStarting: false, stream: null, micEnabled: false, cameraEnabled: false, error: PERMISSION_PROMPT_TIMEOUT_MESSAGE }));
+          return null;
+        }
         warnings.push(messageFor(error, "Microphone access was blocked. You can continue with video only."));
       }
       const tracks = [...(videoStream?.getTracks() || []), ...(audioStream?.getTracks() || [])];

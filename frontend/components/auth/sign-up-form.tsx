@@ -7,6 +7,7 @@ import { AuthCard, Field } from "@/components/auth/sign-in-form";
 import { resolveNextPath } from "@/components/auth/require-auth";
 import { Button } from "@/components/ui/button";
 import { useAuth } from "@/providers/auth-provider";
+import { ApiError } from "@/services/api";
 
 export function SignUpForm() {
   const router = useRouter();
@@ -27,8 +28,8 @@ export function SignUpForm() {
     try {
       await signUp(form);
       router.replace(resolveNextPath(searchParams));
-    } catch {
-      setFormError("We could not create your account with those details.");
+    } catch (requestError) {
+      setFormError(requestError instanceof ApiError ? requestError.message : "We could not create your account. Please try again.");
     } finally {
       setIsSubmitting(false);
     }

@@ -7,6 +7,7 @@ import { Button } from "@/components/ui/button";
 import { Brand } from "@/components/layout/brand";
 import { resolveNextPath } from "@/components/auth/require-auth";
 import { useAuth } from "@/providers/auth-provider";
+import { ApiError } from "@/services/api";
 
 const DEMO_CREDENTIALS = { email: "demo@nexusmeet.app", password: "demo12345" };
 
@@ -26,8 +27,8 @@ export function SignInForm() {
     try {
       await signIn({ email, password });
       router.replace(resolveNextPath(searchParams));
-    } catch {
-      setFormError("We could not sign you in with those details.");
+    } catch (requestError) {
+      setFormError(requestError instanceof ApiError ? requestError.message : "We could not sign you in. Please try again.");
     } finally {
       setIsSubmitting(false);
     }

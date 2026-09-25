@@ -17,9 +17,11 @@ export class ApiError extends Error implements ApiErrorShape {
   }
 }
 
+const REQUEST_TIMEOUT_MS = 60000;
+
 export async function apiRequest<T>(path: string, init: RequestInit = {}): Promise<T> {
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 8000);
+  const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
   const headers = new Headers(init.headers);
   if (init.body && !headers.has("Content-Type")) {
     headers.set("Content-Type", "application/json");
@@ -53,9 +55,9 @@ export async function apiRequest<T>(path: string, init: RequestInit = {}): Promi
   } catch (error) {
     if (error instanceof ApiError) throw error;
     if (error instanceof DOMException && error.name === "AbortError") {
-      throw new ApiError("The request timed out. Please try again.");
+      throw new ApiError("The server is taking too long to respond. It may be starting up, so wait a moment and try again.");
     }
-    throw new ApiError("Unable to connect to the server. Please try again.");
+    throw new ApiError("Unable to reach the server. Check your connection and try again.");
   } finally {
     clearTimeout(timeout);
   }
