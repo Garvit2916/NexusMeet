@@ -1,6 +1,7 @@
 from functools import lru_cache
-from typing import Literal, cast
+from typing import Any, Literal, cast
 
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -31,6 +32,20 @@ class Settings(BaseSettings):
     session_cookie_secure: bool | None = None
     session_cookie_samesite: str = "lax"
     request_id_header: str = "X-Request-ID"
+
+    @field_validator("session_cookie_secure", mode="before")
+    @classmethod
+    def blank_secure_cookie_is_unset(cls, value: Any) -> Any:
+        """Treat a blank environment value as unset.
+
+        Deployment dashboards submit an empty string for optional variables that
+        were never filled in, and pydantic rejects `""` for `bool | None`. An
+        unset value must stay unset so `use_secure_session_cookie` can fall back
+        to the environment instead of crashing the service on start-up.
+        """
+        if isinstance(value, str) and not value.strip():
+            return None
+        return value
 
     @property
     def cors_origin_list(self) -> list[str]:

@@ -35,9 +35,9 @@ services:
         value: "168"
       - key: SESSION_COOKIE_SAMESITE
         value: lax
-      # Leave empty to enable secure cookies automatically when ENVIRONMENT=production
-      - key: SESSION_COOKIE_SECURE
-        value: ""
+      # SESSION_COOKIE_SECURE is intentionally not set. Leaving it unset makes
+      # the API issue Secure cookies because ENVIRONMENT=production. Setting it
+      # to an empty string is not the same thing and fails settings validation.
       - key: DEFAULT_USER_NAME
         value: Demo User
       - key: DEFAULT_USER_EMAIL
