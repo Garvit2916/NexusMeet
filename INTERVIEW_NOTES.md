@@ -16,7 +16,7 @@ Next.js App Router keeps the route structure visible and makes meeting links sha
 - `/meeting/[meetingId]` for public details
 - `/meeting/[meetingId]/room` for pre-join and room state
 
-The frontend does not call `fetch` from page components. `services/api.ts` owns the API base URL, timeout, envelope unwrapping, `X-User-ID` forwarding, and typed errors. `services/meeting-service.ts` owns translation from backend DTOs to UI models. This keeps UI components focused on interaction and makes a future auth adapter replaceable.
+The frontend does not call `fetch` from page components. `services/api.ts` owns the API base URL, request timeout, credentialed cookie handling, envelope unwrapping, and typed errors. `services/auth-service.ts` and `services/meeting-service.ts` own translation from backend DTOs to UI models. This keeps UI components focused on interaction and makes a future token-based adapter replaceable.
 
 ### Backend
 
@@ -35,9 +35,16 @@ SQLite keeps local setup dependency-free. Alembic has an initial schema migratio
 
 ### Identity and security boundary
 
-`UserIdentityProvider` is a protocol with a `DefaultUserIdentityProvider` implementation. Development requests without a current-user header use the seeded default user for protected operations. Public reads are anonymous, and an explicit unknown identity can become a guest only when a display name is supplied to the join endpoint.
+Authentication is a real credential flow, not a development header:
 
-This is deliberately not presented as production authentication. A real deployment should replace the provider with verified session or JWT claims, enforce meeting access policy server-side, and remove the demo identity behavior.
+- Passwords are hashed with Argon2id. The raw password is never stored, logged, or returned.
+- Login or registration issues a random `nxs_`-prefixed token in an HTTP-only, `SameSite` session cookie. Only a SHA-256 hash of the token is persisted in `sessions`, so a database leak cannot be replayed as a live session.
+- Logout revokes the server-side row, so deleting the cookie is not the only protection. Expired rows are purged on authentication.
+- Every authenticated request resolves its user from the session. `X-User-ID` forwarding and guest identities were removed, so a client cannot claim to be another user.
+- Public meeting details and invite links stay readable without an account, while creating, joining, and room actions require a session.
+- Host rights are read from `Meeting.host_id` on the server. The frontend never sends a role, and mute/remove/end requests from a non-host are rejected with `403` before any state changes.
+
+Remaining gaps are deliberate and documented: no password reset, email verification, MFA, or rate limiting.
 
 ## Meeting lifecycle
 
@@ -45,33 +52,38 @@ This is deliberately not presented as production authentication. A real deployme
 2. Instant meetings are created as `live`; scheduled meetings are `scheduled` with no active host participant yet.
 3. A host may join early and start a scheduled meeting.
 4. At or after the scheduled time, the first attendee join transitions the meeting to `live`.
-5. Join creates or reactivates a participant session, associates a display name, and commits atomically.
+5. Join creates or reactivates a participant session, associates a display name, and commits atomically. Removed participants are rejected with `403` and cannot rejoin.
 6. Media controls update the current participant row through `PATCH /participants/me/media`.
 7. Leave marks the participant inactive; ending or cancelling marks all active participants inactive.
 8. Reopening the same room uses the same user/participant record and resets media state on reactivation.
+9. The host can mute or unmute a participant and remove them; the host row itself is protected from both actions.
 
 ## Trade-offs
 
 - Local media is fully implemented, but remote WebRTC is not. A fake remote tile would make the demo look complete while hiding a critical networking requirement.
+- Host mute and removal are enforced as server-side participant state, so a participant cannot bypass the host UI. Physically muting a remote microphone still requires a signaling channel, which is why the limitation is documented instead of implied.
 - Polling participant details every ten seconds keeps the implementation simple and makes state visible after join/leave. A production room should use WebSocket or WebRTC signaling with a presence TTL.
 - The service layer is synchronous because the API contract is simple and SQLite is local-first. Async database support can be introduced without changing route contracts.
-- The frontend uses a development fallback identity to keep the first-run experience usable. The error state makes a missing backend visible instead of silently presenting seeded data as live data.
+- The API issues cookie sessions instead of returning tokens to JavaScript, so the frontend has nothing to store or leak in `localStorage`. The cost is that CORS must enumerate exact origins.
 
 ## Demo script
 
 1. Start the backend and frontend with the commands in `README.md`.
-2. Open the dashboard and use **Create room** to create an instant room.
-3. Open the invite in a second browser or private window, enter a display name, and join.
-4. Toggle camera and microphone in both windows; participant state is persisted and visible in the panel.
-5. Leave the second window and observe the participant count change.
-6. Create a scheduled meeting, copy its invite, and inspect the meeting details and calendar download.
-7. Join after the scheduled time to see the automatic live transition.
-8. Run the backend and frontend verification commands listed in the README.
+2. Sign in with the seeded account `demo@nexusmeet.app` / `demo12345`, or register a new account from `/register`.
+3. Open the dashboard and use **Start meeting** to create an instant room.
+4. Open the invite in a second browser or private window, sign in as a second account, and join.
+5. Toggle camera and microphone in both windows; participant state is persisted and visible in the panel.
+6. As the host, open the participant panel, mute the participant, then remove them; the removed participant sees a notice in their room.
+7. As the host, use **End for all**, confirm the dialog, and observe the meeting close for both windows.
+8. Sign out and confirm `/dashboard` redirects to `/login`.
+9. Create a scheduled meeting, copy its invite, and inspect the meeting details and calendar download.
+10. Join after the scheduled time to see the automatic live transition.
+11. Run the backend and frontend verification commands listed in the README.
 
 ## Production follow-ups
 
 - Replace SQLite with PostgreSQL and run Alembic migrations during deployment.
-- Add real authentication and authorization policies for private meetings.
+- Add password reset, email verification, MFA, and rate limiting on authentication endpoints.
 - Add WebRTC signaling, TURN configuration, reconnect behavior, and moderation controls.
 - Move notifications and invitations to a background job system.
 - Add rate limits, structured logging, metrics, tracing, and audit events.
