@@ -12,7 +12,7 @@ services:
     runtime: python
     plan: free
     buildCommand: cd backend && pip install -r requirements.txt
-    startCommand: cd backend && alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    startCommand: cd backend && alembic upgrade head && exec uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-10000}
     healthCheckPath: /health
     envVars:
       # Pinned to the version the backend is tested on. Render's default
