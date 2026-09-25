@@ -15,6 +15,8 @@ services:
         value: sqlite:////data/nexusmeet.db
       - key: AUTO_CREATE_TABLES
         value: "false"
+      - key: ENVIRONMENT
+        value: production
       - key: CORS_ORIGINS
         sync: false
       - key: SEED_SAMPLE_DATA

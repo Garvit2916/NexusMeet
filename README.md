@@ -179,7 +179,24 @@ npm run build
 
 ## Deployment
 
-`render.yaml` contains a two-service Render blueprint for a small deployment:
+### Frontend on Vercel, API on Render
+
+1. Deploy the API from the `render.yaml` blueprint and note the service URL, for example `https://nexusmeet-api.onrender.com`. Render starts it with `alembic upgrade head` and keeps SQLite on a persistent disk.
+2. Import the repository into Vercel and set the project root directory to `frontend`. Vercel detects Next.js; no build settings are required.
+3. Add these frontend environment variables before deploying:
+
+   | Variable | Value | Purpose |
+   | --- | --- | --- |
+   | `API_ORIGIN` | `https://<api-service>.onrender.com` | Enables the same-origin `/api/*` proxy in `next.config.mjs` |
+   | `NEXT_PUBLIC_API_URL` | `/api/v1` | Makes the browser call only its own origin |
+
+4. In the API service, set `CORS_ORIGINS` for direct API access and keep `ENVIRONMENT=production` so session cookies are issued with the `Secure` flag.
+
+The proxy is deliberate. With the frontend on `*.vercel.app` and the API on `*.onrender.com` the origins are cross-site, so a `SameSite=Lax` session cookie would be dropped by the browser and every authenticated request would fail. Forwarding `/api/*` through Next.js keeps the cookie first-party, so authentication works in any browser without weakening cookie rules. Leave `API_ORIGIN` unset locally and the frontend calls `http://localhost:8000/api/v1` directly.
+
+### All-in-Render alternative
+
+`render.yaml` also contains a two-service Render blueprint for a small deployment:
 
 - FastAPI on a persistent disk for SQLite, started with `alembic upgrade head`
 - Next.js on a Node web service
