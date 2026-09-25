@@ -197,19 +197,20 @@ The proxy is deliberate. With the frontend on `*.vercel.app` and the API on `*.o
 
 ### All-in-Render alternative
 
-`render.yaml` also contains a two-service Render blueprint for a small deployment:
+`render.yaml` defines the API service only, because the frontend runs on Vercel:
 
-- FastAPI on a persistent disk for SQLite, started with `alembic upgrade head`
-- Next.js on a Node web service
+- FastAPI started with `alembic upgrade head`, which builds the schema on boot
 - Environment values marked for dashboard configuration instead of committed secrets
+- `plan: free` with SQLite in `/tmp`, so the database is **ephemeral**: free instances also sleep after inactivity and take roughly 30-60 seconds to wake. Meetings, participants, and sessions created during a demo are lost whenever the instance restarts, and `SEED_SAMPLE_DATA` recreates the demo account on the next boot. Switch the service to the `starter` plan and re-add the commented `disk` block (`sqlite:////data/nexusmeet.db`) when the data must survive restarts.
+- Set `DEFAULT_USER_PASSWORD` in the dashboard. The seeded demo login is public knowledge, so change it before exposing the deployment.
 
-Set the frontend build-time `NEXT_PUBLIC_API_URL` and backend `CORS_ORIGINS` to the actual deployed origins before building, and override `DEFAULT_USER_PASSWORD` in the dashboard. For more than one backend instance, replace SQLite with a shared database and move participant presence/media signaling to a shared realtime service.
+For more than one backend instance, replace SQLite with a shared database and move participant presence/media signaling to a shared realtime service.
 
 ## Known limitations
 
 - Remote WebRTC audio/video is not implemented. The room intentionally shows local video and synchronized participant/media metadata; it does not fake remote video tiles.
 - Host mute and removal are enforced as server-side participant state. Physically muting a remote microphone, and denying camera/mic permission, require a WebRTC signaling channel and permission policies that are out of scope here.
 - There is no rate limiting, password reset, email verification, or multi-factor authentication; add them before public launch.
-- SQLite is appropriate for local development and a single API instance, not high-concurrency production workloads.
+- SQLite is appropriate for local development and a single API instance, not high-concurrency production workloads. The free Render plan adds ephemeral storage and cold starts on top of that.
 - Scheduled-time transitions are evaluated when a join request arrives; a background worker can be added for automatic status changes and notifications.
 - Session cleanup runs on login/registration rather than on a scheduler, so stale rows may linger until the next sign-in.

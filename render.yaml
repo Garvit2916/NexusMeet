@@ -1,18 +1,24 @@
+# Render blueprint: API only. The frontend is deployed to Vercel, so the
+# Next.js service that used to live here is intentionally not defined.
+#
+# The free plan has no persistent disk, so SQLite lives in /tmp and is recreated
+# on every cold start. `alembic upgrade head` builds the schema and the
+# idempotent seed recreates the demo account, so the app always boots clean.
+# Upgrade this service to the starter plan and re-add the `disk` block below
+# when you need meeting data to survive restarts.
 services:
   - type: web
     name: nexusmeet-api
     runtime: python
-    plan: starter
+    plan: free
     buildCommand: cd backend && pip install -r requirements.txt
     startCommand: cd backend && alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port $PORT
     healthCheckPath: /health
-    disk:
-      name: nexusmeet-data
-      mountPath: /data
-      sizeGB: 1
     envVars:
+      # Ephemeral by design on the free plan. For the starter plan use the
+      # persistent disk instead: sqlite:////data/nexusmeet.db
       - key: DATABASE_URL
-        value: sqlite:////data/nexusmeet.db
+        value: sqlite:////tmp/nexusmeet.db
       - key: AUTO_CREATE_TABLES
         value: "false"
       - key: ENVIRONMENT
@@ -20,7 +26,7 @@ services:
       - key: CORS_ORIGINS
         sync: false
       - key: SEED_SAMPLE_DATA
-        value: "false"
+        value: "true"
       - key: SESSION_TTL_HOURS
         value: "168"
       - key: SESSION_COOKIE_SAMESITE
@@ -33,15 +39,4 @@ services:
       - key: DEFAULT_USER_EMAIL
         value: demo@nexusmeet.app
       - key: DEFAULT_USER_PASSWORD
-        sync: false
-
-  - type: web
-    name: nexusmeet-web
-    runtime: node
-    plan: starter
-    buildCommand: cd frontend && npm ci && npm run build
-    startCommand: cd frontend && npm run start
-    healthCheckPath: /
-    envVars:
-      - key: NEXT_PUBLIC_API_URL
         sync: false
