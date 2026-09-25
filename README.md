@@ -2,6 +2,16 @@
 
 NexusMeet is a calm, full-stack meeting workspace built around instant rooms, scheduled meetings, shareable invite links, real email/password accounts, and server-authorized host controls. The project is intentionally small enough to run locally while keeping clear seams for WebRTC and a production database.
 
+## Live deployment
+
+| | |
+| --- | --- |
+| App | **https://nexusmeet-theta.vercel.app** |
+| API | **https://nexusmeet-api.onrender.com** |
+| API docs (Swagger UI) | https://nexusmeet-api.onrender.com/docs |
+
+Sign up with any email and password. The API is on Render's free plan, so it sleeps after inactivity (the first request can take 30-60 seconds) and its SQLite database is ephemeral, meaning accounts and meetings are recreated whenever the instance restarts.
+
 ## Features
 
 - Email/password accounts with Argon2id hashing and revocable server-side sessions
@@ -182,7 +192,7 @@ npm run build
 
 ### Frontend on Vercel, API on Render
 
-1. Deploy the API from the `render.yaml` blueprint and note the service URL, for example `https://nexusmeet-api.onrender.com`. Render starts it with `alembic upgrade head` and keeps SQLite on a persistent disk.
+1. Deploy the API from the `render.yaml` blueprint and note the service URL, for example `https://nexusmeet-api.onrender.com`. Render starts it with `alembic upgrade head` and runs it as a Docker image; on the free plan SQLite lives in `/tmp` and is therefore ephemeral (see the plan notes below).
 2. Import the repository into Vercel and set the project root directory to `frontend`. Vercel detects Next.js; no build settings are required.
 3. Add these frontend environment variables before deploying:
 
@@ -210,6 +220,7 @@ For more than one backend instance, replace SQLite with a shared database and mo
 
 - Remote WebRTC audio/video is not implemented. The room intentionally shows local video and synchronized participant/media metadata; it does not fake remote video tiles.
 - Host mute and removal are enforced as server-side participant state. Physically muting a remote microphone, and denying camera/mic permission, require a WebRTC signaling channel and permission policies that are out of scope here.
+- The pre-join **Check devices** button waits on `navigator.mediaDevices.getUserMedia()`. Browsers grant camera and microphone automatically on `localhost`, but a deployed origin raises a permission prompt first. If that prompt is dismissed or blocked, the request waits rather than failing, so allow camera and microphone for the site from the icon in the address bar. Joining without devices is still possible: **Join meeting** does not depend on the device check.
 - There is no rate limiting, password reset, email verification, or multi-factor authentication; add them before public launch.
 - SQLite is appropriate for local development and a single API instance, not high-concurrency production workloads. The free Render plan adds ephemeral storage and cold starts on top of that.
 - Scheduled-time transitions are evaluated when a join request arrives; a background worker can be added for automatic status changes and notifications.

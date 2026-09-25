@@ -68,17 +68,20 @@ Remaining gaps are deliberate and documented: no password reset, email verificat
 
 ## Demo script
 
-1. Start the backend and frontend with the commands in `README.md`.
-2. Sign in with the seeded account `demo@nexusmeet.app` / `demo12345`, or register a new account from `/register`.
+Fastest path is the live deployment: **https://nexusmeet-theta.vercel.app**, with the API at https://nexusmeet-api.onrender.com and Swagger UI at https://nexusmeet-api.onrender.com/docs. The API runs on Render's free plan, so it sleeps when idle (first request can take 30-60 seconds) and its SQLite database is ephemeral. To run locally instead, start the backend and frontend with the commands in `README.md`.
+
+1. Register a new account from `/register` (the seeded account's password is set per deployment).
+2. Sign in, and confirm `/dashboard` loads with your account name.
 3. Open the dashboard and use **Start meeting** to create an instant room.
-4. Open the invite in a second browser or private window, sign in as a second account, and join.
-5. Toggle camera and microphone in both windows; participant state is persisted and visible in the panel.
-6. As the host, open the participant panel, mute the participant, then remove them; the removed participant sees a notice in their room.
-7. As the host, use **End for all**, confirm the dialog, and observe the meeting close for both windows.
-8. Sign out and confirm `/dashboard` redirects to `/login`.
-9. Create a scheduled meeting, copy its invite, and add the event to Google Calendar, Outlook, or a downloaded `.ics` file.
-10. Join after the scheduled time to see the automatic live transition.
-11. Run the backend and frontend verification commands listed in the README.
+4. On the pre-join screen click **Check devices** and allow camera and microphone when the browser prompts. A deployed origin always requires that prompt, unlike `localhost`; if it is dismissed the request waits, and joining still works without devices.
+5. Open the invite in a second browser or private window, sign in as a second account, and join.
+6. Toggle camera and microphone in both windows; participant state is persisted and visible in the panel.
+7. As the host, open the participant panel, mute the participant, then remove them; the removed participant sees a notice in their room.
+8. As the host, use **End for all**, confirm the dialog, and observe the meeting close for both windows.
+9. Sign out and confirm `/dashboard` redirects to `/login`.
+10. Create a scheduled meeting, copy its invite, and add the event to Google Calendar, Outlook, or a downloaded `.ics` file.
+11. Join after the scheduled time to see the automatic live transition.
+12. Run the backend and frontend verification commands listed in the README.
 
 ## Production follow-ups
 
