@@ -1,0 +1,26 @@
+services:
+  api:
+    build:
+      context: ./backend
+    environment:
+      AUTO_CREATE_TABLES: "true"
+      CORS_ORIGINS: http://localhost:3000,http://127.0.0.1:3000
+      DATABASE_URL: sqlite:////app/data/nexusmeet.db
+      SEED_SAMPLE_DATA: "true"
+    ports:
+      - "8000:8000"
+    volumes:
+      - nexusmeet-data:/app/data
+
+  web:
+    build:
+      context: ./frontend
+      args:
+        NEXT_PUBLIC_API_URL: http://localhost:8000/api/v1
+    depends_on:
+      - api
+    ports:
+      - "3000:3000"
+
+volumes:
+  nexusmeet-data:

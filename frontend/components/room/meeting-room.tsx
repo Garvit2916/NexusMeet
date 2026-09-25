@@ -1,0 +1,223 @@
+"use client";
+
+import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useRouter } from "next/navigation";
+import { ArrowLeft, Camera, CameraOff, Copy, Info, Mic, MicOff, PhoneOff, ShieldCheck, UsersRound, Video } from "lucide-react";
+import { Avatar } from "@/components/ui/avatar";
+import { Button } from "@/components/ui/button";
+import { LoadingState } from "@/components/ui/loading";
+import { ParticipantPanel } from "@/components/room/participant-panel";
+import { LocalVideo } from "@/components/room/local-video";
+import { PrejoinScreen } from "@/components/room/prejoin-screen";
+import { useLocalMedia } from "@/hooks/use-local-media";
+import { useMeeting } from "@/hooks/use-meeting";
+import { meetingService } from "@/services/meeting-service";
+import { formatMeetingRange } from "@/lib/date";
+import { useCurrentUser } from "@/providers/current-user-provider";
+import type { Meeting } from "@/lib/types";
+
+function RoomControl({ label, active, danger = false, disabled = false, onClick, children }: { label: string; active: boolean; danger?: boolean; disabled?: boolean; onClick: () => void; children: ReactNode }) {
+  return <button type="button" disabled={disabled} onClick={onClick} className={`group flex min-w-[48px] flex-col items-center gap-1.5 text-[10px] font-semibold transition disabled:cursor-not-allowed disabled:opacity-40 ${danger ? "text-[#ffb4b7] hover:text-white" : "text-white/60 hover:text-white"}`} aria-label={label} aria-pressed={active}><span className={`flex h-11 w-11 items-center justify-center rounded-xl transition ${danger ? "bg-coral text-white hover:bg-[#c93a40]" : active ? "bg-white/15 text-white" : "bg-white/10 text-white/75 group-hover:bg-white/15"}`}>{children}</span><span className="hidden sm:block">{label}</span></button>;
+}
+
+export function MeetingRoom({ meetingId }: { meetingId: string }) {
+  const router = useRouter();
+  const { user } = useCurrentUser();
+  const { meeting, status, error, refresh } = useMeeting(meetingId);
+  const media = useLocalMedia();
+  const [phase, setPhase] = useState<"prejoin" | "room">("prejoin");
+  const [panelOpen, setPanelOpen] = useState(false);
+  const [elapsed, setElapsed] = useState(0);
+  const [copied, setCopied] = useState(false);
+  const [joinError, setJoinError] = useState<string | null>(null);
+  const [roomError, setRoomError] = useState<string | null>(null);
+  const [isJoining, setIsJoining] = useState(false);
+  const [roomMeeting, setRoomMeeting] = useState<Meeting | null>(null);
+  const joinedRef = useRef(false);
+  const leaveSentRef = useRef(false);
+
+  useEffect(() => {
+    if (meeting) setRoomMeeting(meeting);
+  }, [meeting]);
+
+  useEffect(() => {
+    if (phase !== "room") return;
+    const timer = window.setInterval(() => setElapsed((current) => current + 1), 1000);
+    return () => window.clearInterval(timer);
+  }, [phase]);
+
+  useEffect(() => {
+    if (phase !== "room") return;
+    const interval = window.setInterval(() => void refresh({ silent: true }), 10000);
+    return () => window.clearInterval(interval);
+  }, [phase, refresh]);
+
+  useEffect(() => () => {
+    if (joinedRef.current && !leaveSentRef.current) {
+      leaveSentRef.current = true;
+      void meetingService.leaveMeeting(meetingId, user.id);
+    }
+  }, [meetingId, user.id]);
+
+  async function joinRoom(displayName: string) {
+    setJoinError(null);
+    setRoomError(null);
+    setIsJoining(true);
+    try {
+      const joinedMeeting = await meetingService.joinMeeting(meetingId, displayName, user.id);
+      joinedRef.current = true;
+      leaveSentRef.current = false;
+      setRoomMeeting(joinedMeeting);
+      setElapsed(0);
+      setPhase("room");
+      try {
+        await meetingService.updateMediaState(meetingId, user.id, {
+          audio_enabled: media.micEnabled,
+          video_enabled: media.cameraEnabled,
+        });
+      } catch {
+        setRoomError("You joined the room, but your media status could not be synced.");
+      }
+    } catch (requestError) {
+      setJoinError(requestError instanceof Error ? requestError.message : "We could not join this meeting. Please try again.");
+    } finally {
+      setIsJoining(false);
+    }
+  }
+
+  async function leaveRoom() {
+    if (joinedRef.current && !leaveSentRef.current) {
+      leaveSentRef.current = true;
+      try {
+        await meetingService.leaveMeeting(meetingId, user.id);
+      } catch {
+        setRoomError("The room could not be updated, but your local media is stopping.");
+      }
+    }
+    media.stop();
+    router.replace(`/meeting/${meetingId}`);
+  }
+
+  function leaveBeforeJoin() {
+    media.stop();
+    router.replace(`/meeting/${meetingId}`);
+  }
+
+  async function startMedia() {
+    const stream = await media.start();
+    if (joinedRef.current && stream) {
+      try {
+        await meetingService.updateMediaState(meetingId, user.id, {
+          audio_enabled: stream.getAudioTracks().some((track) => track.enabled),
+          video_enabled: stream.getVideoTracks().some((track) => track.enabled),
+        });
+      } catch {
+        setRoomError("Your media started, but its status could not be synced.");
+      }
+    }
+  }
+
+  async function toggleMicrophone() {
+    const nextEnabled = !media.micEnabled;
+    media.toggleMic();
+    if (!joinedRef.current) return;
+    try {
+      await meetingService.updateMediaState(meetingId, user.id, { audio_enabled: nextEnabled });
+    } catch {
+      media.toggleMic();
+      setRoomError("Your microphone could not be updated for everyone.");
+    }
+  }
+
+  async function toggleCamera() {
+    const nextEnabled = !media.cameraEnabled;
+    media.toggleCamera();
+    if (!joinedRef.current) return;
+    try {
+      await meetingService.updateMediaState(meetingId, user.id, { video_enabled: nextEnabled });
+    } catch {
+      media.toggleCamera();
+      setRoomError("Your camera could not be updated for everyone.");
+    }
+  }
+
+  async function copyLink() {
+    const currentMeeting = roomMeeting ?? meeting;
+    if (!currentMeeting) return;
+    const link = currentMeeting.joinUrl.startsWith("http") ? currentMeeting.joinUrl : `${window.location.origin}${currentMeeting.joinUrl}`;
+    try {
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(link);
+      } else {
+        const textarea = document.createElement("textarea");
+        textarea.value = link;
+        textarea.style.position = "fixed";
+        textarea.style.opacity = "0";
+        document.body.appendChild(textarea);
+        textarea.select();
+        document.execCommand("copy");
+        textarea.remove();
+      }
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 2200);
+    } catch {
+      setCopied(false);
+    }
+  }
+
+  if (status === "loading") return <div className="min-h-screen bg-[#202124] text-white"><div className="flex min-h-screen items-center justify-center"><LoadingState label="Preparing your room" /></div></div>;
+  if (status === "error" || !meeting) return <div className="flex min-h-screen items-center justify-center bg-[#202124] px-5 text-white"><div className="max-w-md text-center"><h1 className="text-2xl font-bold">Room unavailable</h1><p className="mt-3 text-sm leading-6 text-white/60">{error ?? "This meeting could not be loaded."}</p><Button className="mt-6" onClick={() => void refresh()}>Try again</Button></div></div>;
+
+  const currentMeeting = roomMeeting ?? meeting;
+  const scheduledTimeReached = currentMeeting.status === "upcoming" && new Date(currentMeeting.startTime).getTime() <= Date.now();
+  const canJoin = currentMeeting.status === "live" || (currentMeeting.status === "upcoming" && (currentMeeting.host.id === user.id || scheduledTimeReached));
+  if (phase === "prejoin") return <PrejoinScreen meeting={currentMeeting} media={media} defaultDisplayName={user.name} initials={user.initials} onJoin={joinRoom} onLeave={leaveBeforeJoin} joinError={joinError} isJoining={isJoining} canJoin={canJoin} />;
+
+  const onlineParticipants = currentMeeting.participants.filter((participant) => participant.isOnline || participant.userId === user.id);
+  const remoteParticipants = onlineParticipants.filter((participant) => participant.userId !== user.id);
+  const minutes = Math.floor(elapsed / 60).toString().padStart(2, "0");
+  const seconds = (elapsed % 60).toString().padStart(2, "0");
+
+  return (
+    <div className="min-h-screen bg-[#202124] text-white">
+      <header className="flex h-16 items-center justify-between border-b border-white/10 px-4 sm:px-6">
+        <div className="flex min-w-0 items-center gap-3">
+          <button type="button" onClick={() => void leaveRoom()} className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-white/[0.08] text-white/65 transition hover:bg-white/15 hover:text-white" aria-label="Leave meeting"><ArrowLeft className="h-4 w-4" aria-hidden="true" /></button>
+          <div className="min-w-0"><div className="flex items-center gap-2"><span className="flex h-7 w-7 items-center justify-center rounded-lg bg-mint text-white"><Video className="h-3.5 w-3.5" aria-hidden="true" /></span><span className="truncate text-sm font-bold">{currentMeeting.title}</span></div><p className="mt-0.5 hidden text-[11px] text-white/40 sm:block">{formatMeetingRange(currentMeeting.startTime, currentMeeting.endTime)} · {currentMeeting.timezone}</p></div>
+        </div>
+        <div className="flex items-center gap-2">
+          <span className="hidden items-center gap-2 rounded-full bg-white/[0.08] px-3 py-1.5 text-xs font-semibold text-white/65 sm:inline-flex"><span className="h-1.5 w-1.5 animate-pulse rounded-full bg-coral" />{minutes}:{seconds}</span>
+          <button type="button" onClick={() => void copyLink()} className="flex h-9 items-center gap-2 rounded-lg bg-white/[0.08] px-3 text-xs font-semibold text-white/70 transition hover:bg-white/15 hover:text-white" aria-label="Copy meeting link">{copied ? "Copied" : <><Copy className="h-3.5 w-3.5" aria-hidden="true" /><span className="hidden sm:inline">Copy link</span></>}</button>
+        </div>
+      </header>
+      <main className="relative flex min-h-[calc(100vh-64px)] flex-col p-3 sm:p-5">
+        {roomError ? <div className="mb-4 flex items-center justify-between gap-3 rounded-xl border border-[#f5b544]/30 bg-[#f5b544]/10 px-4 py-3 text-sm text-[#ffe5a0]" role="alert"><span>{roomError}</span><button type="button" className="font-semibold underline" onClick={() => setRoomError(null)}>Dismiss</button></div> : null}
+        <div className="relative flex min-h-[480px] flex-1 overflow-hidden rounded-2xl border border-white/10 bg-[#2d3136] p-2 shadow-2xl sm:p-3">
+          <div className="grid min-h-0 flex-1 gap-2 lg:grid-cols-[minmax(0,1fr)_250px]">
+            <div className="relative min-h-[360px] overflow-hidden rounded-xl bg-[#181a1d] sm:min-h-[520px]">
+              <LocalVideo stream={media.stream} className="h-full w-full object-cover" ariaLabel="Your video" />
+              {!media.stream || !media.cameraEnabled ? <div className="absolute inset-0 flex flex-col items-center justify-center bg-[#181a1d]"><span className="flex h-24 w-24 items-center justify-center rounded-full bg-mint text-3xl font-bold text-white">{user.initials}</span><p className="mt-4 text-sm font-bold text-white/80">{!media.stream ? "Camera unavailable" : "Your camera is off"}</p><p className="mt-1 text-xs text-white/40">{!media.stream ? "You can still stay in the room with audio." : "Turn it back on whenever you’re ready."}</p></div> : null}
+              <div className="absolute bottom-4 left-4 flex items-center gap-2 rounded-lg bg-black/40 px-3 py-2 text-xs font-semibold backdrop-blur"><span className="h-1.5 w-1.5 rounded-full bg-mint" />{user.name} <span className="font-normal text-white/50">(you)</span></div>
+              <div className="absolute right-4 top-4 flex items-center gap-2 rounded-lg bg-black/30 px-3 py-2 text-[11px] font-semibold text-white/70 backdrop-blur"><ShieldCheck className="h-3.5 w-3.5 text-mint" aria-hidden="true" />Local media controls</div>
+            </div>
+            <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-1">
+              {remoteParticipants.slice(0, 3).map((participant, index) => <div key={participant.id} className="relative flex min-h-[140px] items-center justify-center overflow-hidden rounded-xl bg-[#3b4046]"><div className="absolute inset-0 room-grid opacity-20" /><Avatar initials={participant.initials} name={participant.name} size="lg" tone={index % 2 ? "lilac" : "coral"} /><div className="absolute bottom-3 left-3 flex items-center gap-2 text-xs font-semibold text-white/75"><span className="h-1.5 w-1.5 rounded-full bg-mint" />{participant.name}</div><span className="absolute right-3 top-3 rounded-full bg-black/25 px-2 py-1 text-[9px] font-semibold text-white/45">Video preview</span></div>)}
+              <div className="col-span-2 flex min-h-[140px] flex-col items-center justify-center rounded-xl border border-dashed border-white/10 bg-white/[0.02] p-4 text-center lg:col-span-1"><span className="flex h-10 w-10 items-center justify-center rounded-xl bg-white/[0.08] text-white/45"><UsersRound className="h-5 w-5" aria-hidden="true" /></span><p className="mt-3 text-xs font-semibold text-white/65">{remoteParticipants.length ? "More participants" : "Waiting for others"}</p><p className="mt-1 text-[10px] leading-4 text-white/35">Remote video is not connected in this preview.</p></div>
+            </div>
+          </div>
+        </div>
+        <div className="mt-4 flex flex-col items-center justify-between gap-4 sm:flex-row">
+          <div className="flex items-center gap-1.5 sm:gap-3">
+            {!media.stream ? <RoomControl label={media.isStarting ? "Connecting" : "Enable media"} active={false} disabled={media.isStarting} onClick={() => void startMedia()}><Camera className="h-5 w-5" aria-hidden="true" /></RoomControl> : null}
+            <RoomControl label={media.micEnabled ? "Mute" : "Unmute"} active={media.micEnabled} disabled={!media.stream} onClick={() => void toggleMicrophone()}><span className={!media.micEnabled ? "rounded-full bg-coral/20 p-1" : ""}>{media.micEnabled ? <Mic className="h-5 w-5" aria-hidden="true" /> : <MicOff className="h-5 w-5" aria-hidden="true" />}</span></RoomControl>
+            <RoomControl label={media.cameraEnabled ? "Camera" : "Camera off"} active={media.cameraEnabled} disabled={!media.stream} onClick={() => void toggleCamera()}><span className={!media.cameraEnabled ? "rounded-full bg-coral/20 p-1" : ""}>{media.cameraEnabled ? <Camera className="h-5 w-5" aria-hidden="true" /> : <CameraOff className="h-5 w-5" aria-hidden="true" />}</span></RoomControl>
+            <RoomControl label="People" active={panelOpen} onClick={() => setPanelOpen((current) => !current)}><UsersRound className="h-5 w-5" aria-hidden="true" /></RoomControl>
+          </div>
+          <RoomControl label="Leave" active={false} danger onClick={() => void leaveRoom()}><PhoneOff className="h-5 w-5" aria-hidden="true" /></RoomControl>
+          <div className="hidden items-center gap-2 text-xs text-white/40 sm:flex"><Info className="h-4 w-4" aria-hidden="true" />Camera and mic controls work locally</div>
+        </div>
+        <ParticipantPanel participants={onlineParticipants} open={panelOpen} onClose={() => setPanelOpen(false)} />
+      </main>
+    </div>
+  );
+}
