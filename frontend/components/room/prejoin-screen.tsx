@@ -5,12 +5,12 @@ import { Camera, CameraOff, CheckCircle2, Mic, MicOff, RefreshCw, ShieldCheck, V
 import { Button } from "@/components/ui/button";
 import { InlineLoading } from "@/components/ui/loading";
 import { LocalVideo } from "@/components/room/local-video";
-import type { LocalMediaState } from "@/hooks/use-local-media";
+import type { LocalMediaState, MediaPermissionState } from "@/hooks/use-local-media";
 import type { Meeting } from "@/lib/types";
 
 type PrejoinScreenProps = {
   meeting: Meeting;
-  media: LocalMediaState & { start: () => Promise<MediaStream | null>; stop: () => void; toggleMic: () => void; toggleCamera: () => void };
+  media: LocalMediaState & { start: () => Promise<MediaStream | null>; stop: () => void; toggleMic: () => void; toggleCamera: () => void; refreshPermission: () => Promise<MediaPermissionState> };
   defaultDisplayName: string;
   initials: string;
   onJoin: (displayName: string) => Promise<void>;
@@ -27,6 +27,17 @@ function MediaToggle({ active, disabled, label, onClick, children }: { active: b
 export function PrejoinScreen({ meeting, media, defaultDisplayName, initials, onJoin, onLeave, joinError, isJoining, canJoin = true }: PrejoinScreenProps) {
   const [displayName, setDisplayName] = useState(defaultDisplayName);
   const [nameError, setNameError] = useState<string | null>(null);
+  const [isRechecking, setIsRechecking] = useState(false);
+  const permissionBlocked = media.permission === "denied";
+
+  async function recheckPermission() {
+    setIsRechecking(true);
+    try {
+      await media.refreshPermission();
+    } finally {
+      setIsRechecking(false);
+    }
+  }
 
   async function handleJoin(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -61,7 +72,7 @@ export function PrejoinScreen({ meeting, media, defaultDisplayName, initials, on
                 <MediaToggle active={media.micEnabled} disabled={!media.stream} label={media.micEnabled ? "Mute microphone" : "Unmute microphone"} onClick={media.toggleMic}>{media.micEnabled ? <Mic className="h-4 w-4" aria-hidden="true" /> : <MicOff className="h-4 w-4" aria-hidden="true" />}{media.micEnabled ? "Mic on" : "Mic off"}</MediaToggle>
                 <MediaToggle active={media.cameraEnabled} disabled={!media.stream} label={media.cameraEnabled ? "Turn camera off" : "Turn camera on"} onClick={media.toggleCamera}>{media.cameraEnabled ? <Camera className="h-4 w-4" aria-hidden="true" /> : <CameraOff className="h-4 w-4" aria-hidden="true" />}{media.cameraEnabled ? "Camera on" : "Camera off"}</MediaToggle>
               </div>
-              <span className="text-xs font-medium text-white/40">{media.stream ? "Devices connected" : "Devices not connected"}</span>
+              <span className="text-xs font-medium text-white/40">{media.stream ? "Devices connected" : permissionBlocked ? "Permission blocked" : "Devices not connected"}</span>
             </div>
           </div>
 
@@ -70,10 +81,11 @@ export function PrejoinScreen({ meeting, media, defaultDisplayName, initials, on
             <div className="mt-7 space-y-3 text-sm text-white/70"><p className="flex items-center gap-3"><CheckCircle2 className="h-4 w-4 text-mint" aria-hidden="true" />Check your camera and microphone</p><p className="flex items-center gap-3"><CheckCircle2 className="h-4 w-4 text-mint" aria-hidden="true" />Review your display name</p><p className="flex items-center gap-3"><CheckCircle2 className="h-4 w-4 text-mint" aria-hidden="true" />Join when you feel ready</p></div>
             <form onSubmit={handleJoin} className="mt-8 space-y-4">
               <div><label htmlFor="display-name" className="mb-2 block text-xs font-semibold text-white/60">Your display name</label><input id="display-name" value={displayName} onChange={(event) => { setDisplayName(event.target.value); setNameError(null); }} maxLength={100} autoComplete="name" className="h-11 w-full rounded-xl border border-white/15 bg-white/10 px-3.5 text-sm text-white outline-none placeholder:text-white/30 focus:border-mint" placeholder="How should others see you?" aria-invalid={Boolean(nameError)} aria-describedby={nameError ? "display-name-error" : undefined} />{nameError ? <p id="display-name-error" className="mt-2 text-xs font-semibold text-[#ffb4b7]" role="alert">{nameError}</p> : null}</div>
-              <div className="flex flex-col gap-2 sm:flex-row"><Button type="button" variant="ghost" onClick={() => void media.start()} disabled={media.isStarting || !media.isSupported} className="h-11 flex-1 text-white hover:bg-white/10 hover:text-white">{media.isStarting ? <InlineLoading label="Checking devices" /> : <><RefreshCw className="h-4 w-4" aria-hidden="true" />Check devices</>}</Button><Button type="submit" disabled={isJoining || !canJoin} className="h-11 flex-1 bg-mint text-white hover:bg-mint-dark">{isJoining ? <InlineLoading label="Joining" /> : <><Video className="h-4 w-4" aria-hidden="true" />Join meeting</>}</Button></div>
+              <div className="flex flex-col gap-2 sm:flex-row"><Button type="button" variant="ghost" onClick={() => void media.start()} disabled={media.isStarting || !media.isSupported || permissionBlocked} className="h-11 flex-1 text-white hover:bg-white/10 hover:text-white">{media.isStarting ? <InlineLoading label="Waiting for permission" /> : permissionBlocked ? "Camera blocked" : <><RefreshCw className="h-4 w-4" aria-hidden="true" />Check devices</>}</Button><Button type="submit" disabled={isJoining || !canJoin} className="h-11 flex-1 bg-mint text-white hover:bg-mint-dark">{isJoining ? <InlineLoading label="Joining" /> : <><Video className="h-4 w-4" aria-hidden="true" />Join meeting</>}</Button></div>
             </form>
             {!canJoin ? <p className="mt-5 rounded-xl border border-[#f5b544]/30 bg-[#f5b544]/10 p-3 text-xs leading-5 text-[#ffe5a0]" role="status">This meeting is not open for joining yet. Return to the meeting details or try again when it starts.</p> : null}
             {joinError ? <div className="mt-5 flex items-start gap-3 rounded-xl border border-coral/30 bg-coral/10 p-3 text-sm text-[#ffb4b7]" role="alert"><CameraOff className="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" /><p>{joinError}</p></div> : null}
+            {permissionBlocked ? <div className="mt-5 rounded-xl border border-[#f5b544]/30 bg-[#f5b544]/10 p-3 text-xs leading-5 text-[#ffe5a0]" role="status"><p className="font-semibold">Camera and microphone are blocked for this site</p><p className="mt-1 text-[#ffe5a0]/80">Click the padlock or camera icon at the end of the address bar, set <span className="font-semibold">Camera</span> and <span className="font-semibold">Microphone</span> to <span className="font-semibold">Allow</span>, then reload this page. Browsers only allow this for the deployed site, which is why it works on localhost without any prompt.</p><button type="button" onClick={() => void recheckPermission()} disabled={isRechecking} className="mt-3 inline-flex items-center gap-2 rounded-lg bg-white/10 px-3 py-1.5 text-xs font-bold text-white transition hover:bg-white/15 disabled:opacity-60">{isRechecking ? "Checking…" : "I allowed it, check again"}</button></div> : null}
             {media.error ? <div className="mt-5 flex items-start gap-3 rounded-xl border border-coral/30 bg-coral/10 p-3 text-sm text-[#ffb4b7]" role="alert"><CameraOff className="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" /><p>{media.error}</p></div> : null}
             <p className="mt-5 flex items-center gap-2 text-xs text-white/35"><CheckCircle2 className="h-4 w-4 text-mint" aria-hidden="true" />Only you can see this preview.</p>
           </div>

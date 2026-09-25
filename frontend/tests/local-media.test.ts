@@ -1,6 +1,18 @@
 import { act, renderHook } from "@testing-library/react";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
-import { useLocalMedia } from "@/hooks/use-local-media";
+import { PERMISSION_BLOCKED_MESSAGE, useLocalMedia } from "@/hooks/use-local-media";
+
+let permissionState: PermissionState = "prompt";
+
+function stubPermissions(state: PermissionState) {
+  permissionState = state;
+  Object.defineProperty(navigator, "permissions", {
+    configurable: true,
+    value: {
+      query: vi.fn(async () => ({ state: permissionState }) as unknown as PermissionStatus),
+    },
+  });
+}
 
 class StubMediaStream {
   private tracks: MediaStreamTrack[];
@@ -131,5 +143,54 @@ describe("useLocalMedia", () => {
     expect(result.current.error).toBeNull();
     expect(result.current.micEnabled).toBe(true);
     expect(result.current.cameraEnabled).toBe(true);
+  });
+
+  it("reports a blocked site instead of prompting when permission was denied", async () => {
+    stubPermissions("denied");
+    const getUserMedia = vi.fn(() => Promise.resolve(stream("audio", "video")));
+    stubMediaDevices(getUserMedia);
+
+    const { result } = renderHook(() => useLocalMedia());
+    await act(async () => {
+      await result.current.start();
+    });
+
+    expect(result.current.permission).toBe("denied");
+    expect(result.current.isStarting).toBe(false);
+    expect(result.current.error).toBe(PERMISSION_BLOCKED_MESSAGE);
+    expect(getUserMedia).not.toHaveBeenCalled();
+  });
+
+  it("prompts normally when the browser has not decided yet", async () => {
+    stubPermissions("prompt");
+    stubMediaDevices(() => Promise.resolve(stream("audio", "video")));
+
+    const { result } = renderHook(() => useLocalMedia());
+    await act(async () => {
+      await result.current.start();
+    });
+
+    expect(result.current.permission).toBe("prompt");
+    expect(result.current.error).toBeNull();
+    expect(result.current.stream).not.toBeNull();
+  });
+
+  it("clears the blocked message once the user allows access", async () => {
+    stubPermissions("denied");
+    stubMediaDevices(() => Promise.resolve(stream("audio", "video")));
+
+    const { result } = renderHook(() => useLocalMedia());
+    await act(async () => {
+      await result.current.start();
+    });
+    expect(result.current.error).toBe(PERMISSION_BLOCKED_MESSAGE);
+
+    permissionState = "granted";
+    await act(async () => {
+      await result.current.refreshPermission();
+    });
+
+    expect(result.current.permission).toBe("granted");
+    expect(result.current.error).toBeNull();
   });
 });
