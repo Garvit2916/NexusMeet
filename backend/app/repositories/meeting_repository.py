@@ -62,6 +62,7 @@ class MeetingRepository:
                 MeetingParticipant.meeting_id == Meeting.id,
                 MeetingParticipant.user_id == user_id,
                 MeetingParticipant.role == ParticipantRole.ATTENDEE,
+                MeetingParticipant.removed_at.is_(None),
             )
         )
         conditions: list[Any] = []

@@ -6,6 +6,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.core.config import Settings
+from app.core.security import hash_password
 from app.db.session import Database
 from app.models.enums import MeetingStatus, ParticipantRole
 from app.models.meeting import Meeting
@@ -18,17 +19,17 @@ SAMPLE_USERS: tuple[tuple[str, str, str], ...] = (
     (
         "usr_seed_maya_00000000000000000001",
         "Maya Chen",
-        "maya.chen@nexusmeet.local",
+        "maya.chen@nexusmeet.app",
     ),
     (
         "usr_seed_noah_00000000000000000001",
         "Noah Williams",
-        "noah.williams@nexusmeet.local",
+        "noah.williams@nexusmeet.app",
     ),
     (
         "usr_seed_priya_00000000000000000001",
         "Priya Shah",
-        "priya.shah@nexusmeet.local",
+        "priya.shah@nexusmeet.app",
     ),
 )
 
@@ -84,22 +85,53 @@ SAMPLE_MEETINGS: tuple[tuple[str, int, int, MeetingStatus, tuple[str, ...]], ...
 )
 
 
+LEGACY_SEED_EMAIL_SUFFIX = "@nexusmeet.local"
+
+
+def _normalize_legacy_seed_email(user: User, email: str) -> bool:
+    """Re-point seeded demo accounts at a deliverable email domain.
+
+    Password validation rejects reserved domains such as `.local`, so demo rows
+    created by earlier revisions are rewritten once to the configured address.
+    """
+    if not user.email.endswith(LEGACY_SEED_EMAIL_SUFFIX):
+        return False
+    normalized = email.strip().lower()
+    if user.email == normalized:
+        return False
+    user.email = normalized
+    return True
+
+
 def seed_default_user(
     session_factory: sessionmaker[Session],
     *,
     user_id: str,
     name: str,
     email: str,
+    password: str,
     avatar_url: str | None = None,
 ) -> bool:
     with session_factory() as session:
-        if UserRepository(session).get_by_id(user_id) is not None:
+        repository = UserRepository(session)
+        existing = repository.get_by_id(user_id)
+        if existing is not None:
+            changed = _normalize_legacy_seed_email(existing, email)
+            # Databases created before authentication shipped have no password
+            # hash, so backfill the documented development password once.
+            if existing.password_hash is None:
+                existing.password_hash = hash_password(password)
+                changed = True
+            if changed:
+                session.commit()
+                return True
             return False
         session.add(
             User(
                 id=user_id,
                 name=name,
                 email=email.lower(),
+                password_hash=hash_password(password),
                 avatar_url=avatar_url,
             )
         )
@@ -123,11 +155,21 @@ def _sample_start(reference: datetime, day_offset: int, hour: int) -> datetime:
     )
 
 
-def _seed_sample_user(session: Session, user_id: str, name: str, email: str) -> bool:
+def _seed_sample_user(session: Session, user_id: str, name: str, email: str, password: str) -> bool:
     repository = UserRepository(session)
-    if repository.get_by_id(user_id) is not None or repository.get_by_email(email) is not None:
+    existing = repository.get_by_id(user_id)
+    if existing is not None:
+        changed = _normalize_legacy_seed_email(existing, email)
+        if existing.password_hash is None:
+            existing.password_hash = hash_password(password)
+            changed = True
+        if changed:
+            session.flush()
+            return True
         return False
-    repository.add(User(id=user_id, name=name, email=email))
+    if repository.get_by_email(email) is not None:
+        return False
+    repository.add(User(id=user_id, name=name, email=email, password_hash=hash_password(password)))
     return True
 
 
@@ -174,7 +216,10 @@ def seed_sample_meetings(database: Database, settings: Settings) -> bool:
     reference = utc_now()
     with database.session_factory() as session:
         for user_id, name, email in SAMPLE_USERS:
-            created = _seed_sample_user(session, user_id, name, email) or created
+            created = (
+                _seed_sample_user(session, user_id, name, email, settings.default_user_password)
+                or created
+            )
         session.flush()
         for title, day_offset, hour, status, attendee_ids in SAMPLE_MEETINGS:
             meeting_id = _sample_meeting_id(title)
@@ -252,6 +297,7 @@ def seed_database(database: Database, settings: Settings) -> bool:
         user_id=settings.default_user_id,
         name=settings.default_user_name,
         email=settings.default_user_email,
+        password=settings.default_user_password,
         avatar_url=settings.default_user_avatar_url,
     )
     if not settings.seed_sample_data:

@@ -1,4 +1,5 @@
 from functools import lru_cache
+from typing import Literal, cast
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -21,10 +22,14 @@ class Settings(BaseSettings):
     cors_origins: str = "http://localhost:3000,http://127.0.0.1:3000"
     default_user_id: str = "usr_default_000000000000000000000001"
     default_user_name: str = "Demo User"
-    default_user_email: str = "demo@nexusmeet.local"
+    default_user_email: str = "demo@nexusmeet.app"
     default_user_avatar_url: str | None = None
+    default_user_password: str = "demo12345"
     seed_sample_data: bool = True
-    current_user_header: str = "X-User-ID"
+    session_cookie_name: str = "nexusmeet_session"
+    session_ttl_hours: int = 168
+    session_cookie_secure: bool | None = None
+    session_cookie_samesite: str = "lax"
     request_id_header: str = "X-Request-ID"
 
     @property
@@ -34,6 +39,23 @@ class Settings(BaseSettings):
     @property
     def is_production(self) -> bool:
         return self.environment.lower() == "production"
+
+    @property
+    def session_ttl_seconds(self) -> int:
+        return max(self.session_ttl_hours, 1) * 3600
+
+    @property
+    def use_secure_session_cookie(self) -> bool:
+        if self.session_cookie_secure is None:
+            return self.is_production
+        return self.session_cookie_secure
+
+    @property
+    def session_cookie_samesite_value(self) -> Literal["lax", "strict", "none"]:
+        value = self.session_cookie_samesite.strip().lower()
+        if value in {"lax", "strict", "none"}:
+            return cast(Literal["lax", "strict", "none"], value)
+        return "lax"
 
 
 @lru_cache

@@ -10,7 +10,6 @@ from app.api.health import router as health_router
 from app.api.v1.router import router as api_v1_router
 from app.core.config import Settings, get_settings
 from app.core.errors import register_exception_handlers
-from app.core.users import DefaultUserIdentityProvider
 from app.db.init_db import initialize_database
 from app.db.seed import seed_database
 from app.db.session import Database
@@ -44,7 +43,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     application.state.settings = app_settings
     application.state.database = database
     application.state.session_factory = database.session_factory
-    application.state.user_identity_provider = DefaultUserIdentityProvider(app_settings)
 
     @application.middleware("http")
     async def request_id_middleware(
@@ -63,8 +61,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         CORSMiddleware,
         allow_origins=app_settings.cors_origin_list,
         allow_credentials=not allow_all_origins,
-        allow_methods=["GET", "POST", "PATCH", "OPTIONS"],
-        allow_headers=["Authorization", "Content-Type", app_settings.current_user_header],
+        allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
+        allow_headers=["Content-Type", "Accept", "Authorization", app_settings.request_id_header],
         expose_headers=[app_settings.request_id_header],
     )
     register_exception_handlers(application)

@@ -24,7 +24,6 @@ from app.schemas.meeting import (
     UpdateMeetingRequest,
 )
 from app.schemas.participant import JoinMeetingRequest, MediaStateUpdate, ParticipantResponse
-from app.services.user_service import UserService
 from app.utils.ids import generate_meeting_id
 from app.utils.time import ensure_utc, utc_now
 
@@ -34,7 +33,6 @@ class MeetingService:
         self.session = session
         self.meetings = MeetingRepository(session)
         self.participants = ParticipantRepository(session)
-        self.users = UserService(UserRepository(session))
 
     def schedule(self, host: User, payload: ScheduleMeetingRequest) -> MeetingDetails:
         scheduled_at = ensure_utc(payload.scheduled_at)
@@ -229,12 +227,12 @@ class MeetingService:
     def join(
         self,
         meeting_id: str,
-        current_user: User | None,
+        current_user: User,
         payload: JoinMeetingRequest | None = None,
     ) -> MeetingDetails:
         meeting = self._required_meeting(meeting_id)
         display_name = payload.display_name if payload is not None else None
-        actor = self._resolve_joining_user(current_user, display_name)
+        actor = current_user
         now = utc_now()
         if meeting.status is MeetingStatus.SCHEDULED:
             is_host = meeting.host_id == actor.id
@@ -253,6 +251,13 @@ class MeetingService:
             self._raise_transition(meeting, "join", {MeetingStatus.LIVE})
 
         participant = self.participants.get_for_user(meeting.id, actor.id)
+        if participant is not None and participant.removed_at is not None:
+            raise AppError(
+                403,
+                "PARTICIPANT_REMOVED",
+                "You were removed from this meeting by the host",
+                {"meeting_id": meeting.id},
+            )
         if self._is_active(participant):
             if display_name is not None and participant is not None:
                 participant.display_name = display_name
@@ -289,6 +294,12 @@ class MeetingService:
         if meeting.status is not MeetingStatus.LIVE:
             self._raise_transition(meeting, "leave", {MeetingStatus.LIVE})
         participant = self.participants.get_for_user(meeting.id, current_user.id)
+        if participant is not None and participant.removed_at is not None:
+            raise AppError(
+                403,
+                "PARTICIPANT_REMOVED",
+                "You were removed from this meeting by the host",
+            )
         if not self._is_active(participant):
             raise AppError(
                 409,
@@ -299,6 +310,48 @@ class MeetingService:
         self.participants.mark_left(participant, utc_now())
         self._commit()
         return self._load_details(meeting.id, current_user.id)
+
+    def require_host(self, meeting_id: str, user: User) -> Meeting:
+        meeting = self._required_meeting(meeting_id)
+        self._require_host(meeting, user)
+        return meeting
+
+    def mute_participant(
+        self,
+        meeting_id: str,
+        host: User,
+        participant_id: int,
+        *,
+        muted: bool,
+    ) -> ParticipantResponse:
+        meeting = self.require_host(meeting_id, host)
+        if meeting.status is not MeetingStatus.LIVE:
+            self._raise_transition(meeting, "mute a participant", {MeetingStatus.LIVE})
+        participant = self._require_participant(meeting.id, participant_id)
+        self._reject_host_target(participant, "mute")
+        self.participants.set_host_mute(participant, muted=muted, muted_at=utc_now())
+        self._commit()
+        return ParticipantResponse.model_validate(participant)
+
+    def remove_participant(
+        self,
+        meeting_id: str,
+        host: User,
+        participant_id: int,
+    ) -> ParticipantResponse:
+        meeting = self.require_host(meeting_id, host)
+        participant = self._require_participant(meeting.id, participant_id)
+        if participant.removed_at is not None:
+            raise AppError(
+                409,
+                "PARTICIPANT_ALREADY_REMOVED",
+                "This participant has already been removed from the meeting",
+            )
+        self._reject_host_target(participant, "remove")
+        if self._is_active(participant):
+            self.participants.mark_removed(participant, utc_now())
+        self._commit()
+        return ParticipantResponse.model_validate(participant)
 
     def get_participants(
         self,
@@ -319,6 +372,12 @@ class MeetingService:
         if meeting.status is not MeetingStatus.LIVE:
             self._raise_transition(meeting, "update media state", {MeetingStatus.LIVE})
         participant = self.participants.get_for_user(meeting.id, current_user.id)
+        if participant is not None and participant.removed_at is not None:
+            raise AppError(
+                403,
+                "PARTICIPANT_REMOVED",
+                "You were removed from this meeting by the host",
+            )
         if not self._is_active(participant):
             raise AppError(
                 409,
@@ -418,21 +477,6 @@ class MeetingService:
                 )
             )
 
-    def _resolve_joining_user(
-        self,
-        current_user: User | None,
-        display_name: str | None,
-    ) -> User:
-        if current_user is not None:
-            return current_user
-        if display_name is None:
-            raise AppError(
-                400,
-                "DISPLAY_NAME_REQUIRED",
-                "A display name is required to join as a guest",
-            )
-        return self.users.create_guest(display_name)
-
     def _load_details(self, meeting_id: str, user_id: str | None) -> MeetingDetails:
         meeting = self._required_meeting(meeting_id)
         participant = (
@@ -465,6 +509,27 @@ class MeetingService:
             )
         return meeting
 
+    def _require_participant(self, meeting_id: str, participant_id: int) -> MeetingParticipant:
+        participant = self.participants.get_by_id(participant_id)
+        if participant is None or participant.meeting_id != meeting_id:
+            raise AppError(
+                404,
+                "PARTICIPANT_NOT_FOUND",
+                "Participant not found in this meeting",
+                {"participant_id": participant_id},
+            )
+        return participant
+
+    @staticmethod
+    def _reject_host_target(participant: MeetingParticipant, action: str) -> None:
+        if participant.is_host:
+            raise AppError(
+                409,
+                "HOST_PARTICIPANT_PROTECTED",
+                f"The host cannot be {action} by a host control",
+                {"participant_id": participant.id},
+            )
+
     @staticmethod
     def _require_host(meeting: Meeting, user: User) -> None:
         if meeting.host_id != user.id:
@@ -490,6 +555,7 @@ class MeetingService:
             participant is not None
             and participant.joined_at is not None
             and participant.left_at is None
+            and participant.removed_at is None
         )
 
     @staticmethod

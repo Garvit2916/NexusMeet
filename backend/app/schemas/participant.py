@@ -50,6 +50,10 @@ class MediaStateUpdate(APIModel):
         return self
 
 
+class HostMuteUpdate(APIModel):
+    muted: bool = True
+
+
 class ParticipantResponse(APIModel):
     id: int
     user: UserResponse
@@ -62,8 +66,13 @@ class ParticipantResponse(APIModel):
     role: ParticipantRole
     is_host: bool = False
     is_online: bool = False
+    is_active: bool = False
+    is_muted: bool = False
+    muted_by_host: bool = False
+    is_removed: bool = False
     joined_at: datetime | None
     left_at: datetime | None
+    removed_at: datetime | None = None
     audio_enabled: bool
     video_enabled: bool
     screen_sharing: bool
@@ -74,6 +83,9 @@ class ParticipantResponse(APIModel):
     displayName: str = ""
     isOnline: bool = False
     isHost: bool = False
+    isMuted: bool = False
+    isRemoved: bool = False
+    mutedByHost: bool = False
     audioEnabled: bool = False
     videoEnabled: bool = False
 
@@ -86,12 +98,19 @@ class ParticipantResponse(APIModel):
         self.avatar_url = self.avatar_url or self.user.avatar_url
         self.initials = self.initials or self._build_initials(self.display_name)
         self.is_host = self.role is ParticipantRole.HOST
+        self.is_removed = self.is_removed or self.removed_at is not None
+        self.is_online = self.is_online and not self.is_removed
+        self.is_active = self.is_online and self.joined_at is not None
+        self.muted_by_host = self.is_muted and not self.audio_enabled
         self.joinedAt = self.joinedAt or self.joined_at
         self.avatarUrl = self.avatarUrl or self.avatar_url
         self.userId = self.userId or self.user_id
         self.displayName = self.displayName or self.display_name
         self.isOnline = self.is_online
         self.isHost = self.is_host
+        self.isMuted = self.is_muted
+        self.isRemoved = self.is_removed
+        self.mutedByHost = self.muted_by_host
         self.audioEnabled = self.audio_enabled
         self.videoEnabled = self.video_enabled
         return self

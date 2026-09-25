@@ -61,6 +61,8 @@ class MeetingParticipant(Base):
     audio_enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     video_enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     screen_sharing: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    is_muted: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    removed_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
     created_at = mapped_column(UTCDateTime, default=utc_now, nullable=False)
     updated_at = mapped_column(UTCDateTime, default=utc_now, onupdate=utc_now, nullable=False)
 
@@ -84,6 +86,18 @@ class MeetingParticipant(Base):
     @property
     def is_online(self) -> bool:
         return self.joined_at is not None and self.left_at is None
+
+    @property
+    def is_removed(self) -> bool:
+        return self.removed_at is not None
+
+    @property
+    def is_active(self) -> bool:
+        return self.is_online and not self.is_removed
+
+    @property
+    def is_muted_by_host(self) -> bool:
+        return self.is_muted and not self.audio_enabled
 
     @property
     def is_host(self) -> bool:

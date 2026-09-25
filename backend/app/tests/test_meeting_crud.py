@@ -1,5 +1,4 @@
 import re
-from collections.abc import Callable
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -29,12 +28,10 @@ def test_instant_meeting_ids_are_random_and_non_sequential(client: TestClient) -
 
 def test_schedule_get_list_and_update(
     client: TestClient,
-    auth_headers: Callable[..., dict[str, str]],
     future_time: datetime,
 ) -> None:
     response = client.post(
         "/api/v1/meetings/schedule",
-        headers=auth_headers(),
         json={
             "title": "Architecture review",
             "description": "Quarterly planning",

@@ -42,6 +42,7 @@ class ParticipantRepository:
                 MeetingParticipant.meeting_id == meeting_id,
                 MeetingParticipant.joined_at.is_not(None),
                 MeetingParticipant.left_at.is_(None),
+                MeetingParticipant.removed_at.is_(None),
             )
             .options(joinedload(MeetingParticipant.user))
             .order_by(MeetingParticipant.joined_at, MeetingParticipant.id)
@@ -59,6 +60,7 @@ class ParticipantRepository:
             MeetingParticipant.id != exclude_participant_id,
             MeetingParticipant.joined_at.is_not(None),
             MeetingParticipant.left_at.is_(None),
+            MeetingParticipant.removed_at.is_(None),
             MeetingParticipant.screen_sharing.is_(True),
         )
         return self.session.scalar(statement)
@@ -71,9 +73,11 @@ class ParticipantRepository:
     ) -> MeetingParticipant:
         participant.joined_at = joined_at
         participant.left_at = None
+        participant.removed_at = None
         participant.audio_enabled = True
         participant.video_enabled = True
         participant.screen_sharing = False
+        participant.is_muted = False
         participant.updated_at = joined_at
         self.session.flush()
         return participant
@@ -82,6 +86,33 @@ class ParticipantRepository:
         participant.left_at = left_at
         participant.screen_sharing = False
         participant.updated_at = left_at
+        self.session.flush()
+        return participant
+
+    def set_host_mute(
+        self,
+        participant: MeetingParticipant,
+        *,
+        muted: bool,
+        muted_at: datetime,
+    ) -> MeetingParticipant:
+        participant.is_muted = muted
+        if muted:
+            participant.audio_enabled = False
+        participant.updated_at = muted_at
+        self.session.flush()
+        return participant
+
+    def mark_removed(
+        self,
+        participant: MeetingParticipant,
+        removed_at: datetime,
+    ) -> MeetingParticipant:
+        participant.removed_at = removed_at
+        participant.left_at = removed_at
+        participant.screen_sharing = False
+        participant.is_muted = False
+        participant.updated_at = removed_at
         self.session.flush()
         return participant
 

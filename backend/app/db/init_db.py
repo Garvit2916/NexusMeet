@@ -2,7 +2,7 @@ from sqlalchemy import Column, Engine, MetaData, String, Table, inspect, select,
 
 from app.db.base import Base
 
-CURRENT_SCHEMA_REVISION = "0002_meeting_duration"
+CURRENT_SCHEMA_REVISION = "0003_auth_and_host_controls"
 
 
 def initialize_database(engine: Engine) -> None:
@@ -27,6 +27,10 @@ def _ensure_migration_stamp(engine: Engine) -> None:
         ).scalar_one_or_none()
         if current_revision is None:
             connection.execute(version_table.insert().values(version_num=CURRENT_SCHEMA_REVISION))
+        elif current_revision != CURRENT_SCHEMA_REVISION:
+            # The compatibility pass above already materialized the current schema,
+            # so bring the stamp forward instead of replaying a migration.
+            connection.execute(version_table.update().values(version_num=CURRENT_SCHEMA_REVISION))
 
 
 def _add_compatibility_columns(engine: Engine) -> None:
@@ -43,6 +47,10 @@ def _add_compatibility_columns(engine: Engine) -> None:
             statements.append(
                 "ALTER TABLE meetings ADD COLUMN timezone VARCHAR(64) NOT NULL DEFAULT 'UTC'"
             )
+    if "users" in table_names:
+        user_columns = {column["name"] for column in inspector.get_columns("users")}
+        if "password_hash" not in user_columns:
+            statements.append("ALTER TABLE users ADD COLUMN password_hash VARCHAR(255)")
     if "meeting_participants" in table_names:
         participant_columns = {
             column["name"] for column in inspector.get_columns("meeting_participants")
@@ -52,6 +60,12 @@ def _add_compatibility_columns(engine: Engine) -> None:
                 "ALTER TABLE meeting_participants "
                 "ADD COLUMN display_name VARCHAR(100) NOT NULL DEFAULT ''"
             )
+        if "is_muted" not in participant_columns:
+            statements.append(
+                "ALTER TABLE meeting_participants ADD COLUMN is_muted BOOLEAN NOT NULL DEFAULT 0"
+            )
+        if "removed_at" not in participant_columns:
+            statements.append("ALTER TABLE meeting_participants ADD COLUMN removed_at DATETIME")
     if not statements:
         return
     with engine.begin() as connection:

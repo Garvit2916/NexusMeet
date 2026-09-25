@@ -12,6 +12,7 @@ from app.utils.time import utc_now
 if TYPE_CHECKING:
     from app.models.meeting import Meeting
     from app.models.participant import MeetingParticipant
+    from app.models.session import AuthSession
 
 
 class User(Base):
@@ -20,6 +21,7 @@ class User(Base):
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
     name: Mapped[str] = mapped_column(String(100), nullable=False)
     email: Mapped[str] = mapped_column(String(320), unique=True, nullable=False, index=True)
+    password_hash: Mapped[str | None] = mapped_column(String(255), nullable=True)
     avatar_url: Mapped[str | None] = mapped_column(String(2048), nullable=True)
     created_at = mapped_column(UTCDateTime, default=utc_now, nullable=False)
     updated_at = mapped_column(UTCDateTime, default=utc_now, onupdate=utc_now, nullable=False)
@@ -31,4 +33,9 @@ class User(Base):
     participations: Mapped[list[MeetingParticipant]] = relationship(
         back_populates="user",
         foreign_keys="MeetingParticipant.user_id",
+    )
+    sessions: Mapped[list[AuthSession]] = relationship(
+        back_populates="user",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
     )
