@@ -18,6 +18,9 @@ export type Participant = {
   initials: string;
   role: UserRole;
   isOnline: boolean;
+  isMuted: boolean;
+  mutedByHost: boolean;
+  isRemoved: boolean;
   audioEnabled: boolean;
   videoEnabled: boolean;
   screenSharing: boolean;

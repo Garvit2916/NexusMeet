@@ -26,9 +26,15 @@ export type ApiParticipant = {
   avatar_url?: string | null;
   initials?: string;
   role?: "host" | "presenter" | "attendee";
+  is_host?: boolean;
   is_online?: boolean;
+  is_active?: boolean;
+  is_muted?: boolean;
+  muted_by_host?: boolean;
+  is_removed?: boolean;
   joined_at?: string | null;
   left_at?: string | null;
+  removed_at?: string | null;
   audio_enabled?: boolean;
   video_enabled?: boolean;
   screen_sharing?: boolean;

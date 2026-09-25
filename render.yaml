@@ -19,10 +19,19 @@ services:
         sync: false
       - key: SEED_SAMPLE_DATA
         value: "false"
+      - key: SESSION_TTL_HOURS
+        value: "168"
+      - key: SESSION_COOKIE_SAMESITE
+        value: lax
+      # Leave empty to enable secure cookies automatically when ENVIRONMENT=production
+      - key: SESSION_COOKIE_SECURE
+        value: ""
       - key: DEFAULT_USER_NAME
         value: Demo User
       - key: DEFAULT_USER_EMAIL
-        value: demo@nexusmeet.local
+        value: demo@nexusmeet.app
+      - key: DEFAULT_USER_PASSWORD
+        sync: false
 
   - type: web
     name: nexusmeet-web

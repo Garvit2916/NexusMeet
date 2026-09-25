@@ -11,17 +11,17 @@ import { ErrorState } from "@/components/ui/error-state";
 import { LoadingState } from "@/components/ui/loading";
 import { SectionHeading } from "@/components/ui/section-heading";
 import { useMeetings } from "@/hooks/use-meetings";
-import { useCurrentUser } from "@/providers/current-user-provider";
+import { useAuth } from "@/providers/auth-provider";
 
 export function DashboardView() {
-  const { user } = useCurrentUser();
+  const { user } = useAuth();
   const { meetings, status, error, refresh } = useMeetings();
   const searchParams = useSearchParams();
   const query = searchParams.get("query")?.trim() ?? "";
   const visibleMeetings = query ? meetings.filter((meeting) => `${meeting.title} ${meeting.description}`.toLowerCase().includes(query.toLowerCase())) : meetings;
   const upcoming = visibleMeetings.filter((meeting) => meeting.status === "upcoming" || meeting.status === "live");
   const recent = visibleMeetings.filter((meeting) => meeting.status === "ended" || meeting.status === "cancelled");
-  const firstName = user.name.split(" ")[0];
+  const firstName = user?.name.split(" ")[0] ?? "there";
 
   return (
     <div className="mx-auto max-w-7xl space-y-7 animate-float-in">

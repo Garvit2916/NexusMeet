@@ -1,9 +1,12 @@
 # NexusMeet
 
-NexusMeet is a calm, full-stack meeting workspace built around instant rooms, scheduled meetings, shareable invite links, and local camera/microphone previews. The project is intentionally small enough to run locally while keeping clear seams for authentication, WebRTC, and a production database.
+NexusMeet is a calm, full-stack meeting workspace built around instant rooms, scheduled meetings, shareable invite links, real email/password accounts, and server-authorized host controls. The project is intentionally small enough to run locally while keeping clear seams for WebRTC and a production database.
 
 ## Features
 
+- Email/password accounts with Argon2id hashing and revocable server-side sessions
+- Secure, HTTP-only session cookies (no tokens in `localStorage`, no `X-User-ID` identity header)
+- Protected workspace, scheduling, and room routes with `next`-aware redirects
 - Responsive dashboard with upcoming and completed meetings
 - Instant room creation
 - Scheduled meetings with duration, timezone, description, and invite emails
@@ -12,9 +15,10 @@ NexusMeet is a calm, full-stack meeting workspace built around instant rooms, sc
 - Pre-join camera and microphone preview
 - Permission-aware local media with graceful camera/microphone fallbacks
 - Persisted join, leave, and media-state updates
-- Participant panel with host, online, microphone, camera, and screen-share state
+- Host-only end meeting, mute/unmute, and remove participant controls backed by the server
+- Participant panel with host, muted-by-host, removed, online, microphone, camera, and screen-share state
 - Scheduled meetings automatically become live when an attendee joins at or after the start time
-- Idempotent default-user and sample-data seeding
+- Idempotent default-user and sample-data seeding, including legacy seed backfill
 - Typed frontend API boundary with request timeouts and structured errors
 - FastAPI validation and consistent response envelopes
 - SQLite for zero-configuration local development
@@ -23,7 +27,7 @@ NexusMeet is a calm, full-stack meeting workspace built around instant rooms, sc
 
 - **Frontend:** Next.js 15, React 19, TypeScript, Tailwind CSS, Vitest
 - **Backend:** FastAPI, Pydantic 2, SQLAlchemy 2, Alembic, SQLite
-- **Identity:** A replaceable `UserIdentityProvider` with a development default user
+- **Auth:** Argon2id password hashing, opaque server-side sessions, HTTP-only cookies
 - **Media:** Browser `MediaStream` APIs for local preview and controls
 
 ## Repository layout
@@ -32,7 +36,7 @@ NexusMeet is a calm, full-stack meeting workspace built around instant rooms, sc
 backend/
   app/
     api/                 FastAPI routes and dependencies
-    core/                Settings, errors, identity provider
+    core/                Settings, security helpers, errors
     db/                  Database setup, migrations, seed data
     models/              SQLAlchemy entities
     repositories/        Persistence boundaries
@@ -42,9 +46,10 @@ backend/
   alembic/                Versioned schema migrations
 frontend/
   app/                    Next.js App Router routes
-  components/             Dashboard, forms, room, and UI components
+  components/             Auth, dashboard, forms, room, and UI components
   hooks/                  Data loading and local media state
   lib/                    Types, parsing, formatting, and helpers
+  providers/              Auth and UI state providers
   services/               Typed API client boundary
   tests/                  Vitest component and utility tests
 ```
@@ -81,7 +86,38 @@ npm run dev
 
 Open `http://localhost:3000`.
 
-The default development user is `Demo User` (`demo@nexusmeet.local`). Public meeting reads do not require a user header. Protected development endpoints use the default user when no header is supplied. The room client sends the known user ID when joining so participant state is associated with a stable user.
+## Authentication
+
+- Seeded development account: `demo@nexusmeet.app` / `demo12345` (override `DEFAULT_USER_PASSWORD` for any shared environment).
+- Registration requires a name, a unique email, and a password of at least 8 characters.
+- Passwords are hashed with Argon2id; the raw password is never stored or logged.
+- On login or registration the API issues a random `nxs_`-prefixed token in an HTTP-only `nexusmeet_session` cookie and stores only its SHA-256 hash in the `sessions` table.
+- Session lifetime is `SESSION_TTL_HOURS` (168 hours by default). `SESSION_COOKIE_SAMESITE` accepts `lax`, `strict`, or `none`, and `SESSION_COOKIE_SECURE` defaults to enabled in production.
+- Logout revokes the server-side session, so the cookie cannot be replayed.
+- CORS must list the exact frontend origins with credentials allowed; wildcard origins are rejected because the API uses cookies.
+- Meetings can be created and signed up for with an account, and every participant is identified by the session's user record, never by a client-supplied user ID.
+
+### Auth endpoints
+
+| Method | Path | Purpose |
+| --- | --- | --- |
+| `POST` | `/api/v1/auth/register` | Create an account and start a session |
+| `POST` | `/api/v1/auth/login` | Verify credentials and start a session |
+| `GET` | `/api/v1/auth/me` | Current session user with hosted/joined counts |
+| `POST` | `/api/v1/auth/logout` | Revoke the current session and clear the cookie |
+
+## Host controls
+
+Host authorization is enforced in the service layer against `Meeting.host_id`, so neither the frontend role nor any request body can grant host rights.
+
+- End a meeting for everyone (host only)
+- Mute or unmute a participant (host only; the host cannot be muted)
+- Remove a participant (host only; the host cannot be removed)
+- Removing marks the participant row with `removed_at` and drops their camera/mic state; removed participants cannot rejoin and are excluded from active participant lists
+- Rejoining after a normal leave reactivates the existing row and clears stale mute state
+- Removed participants and ended meetings are surfaced in the room UI with a clear next action
+
+Mute and removal control the server's participant/media state. They do not silence a remote microphone by themselves, because no WebRTC peer connection or signaling channel exists yet.
 
 ## API surface
 
@@ -100,7 +136,7 @@ Errors use a stable error envelope with a machine-readable `error.code`.
 | Method | Path | Purpose |
 | --- | --- | --- |
 | `GET` | `/health` | Liveness/readiness response |
-| `GET` | `/users/me` | Current development user |
+| `GET` | `/users/me` | Current session user profile |
 | `GET` | `/meetings` | Hosted/joined meeting list |
 | `POST` | `/meetings` | Schedule a meeting alias |
 | `POST` | `/meetings/schedule` | Schedule a meeting |
@@ -110,10 +146,12 @@ Errors use a stable error envelope with a machine-readable `error.code`.
 | `POST` | `/meetings/{id}/start` | Host starts a scheduled meeting |
 | `POST` | `/meetings/{id}/end` | Host ends a live meeting |
 | `POST` | `/meetings/{id}/cancel` | Host cancels a meeting |
-| `POST` | `/meetings/{id}/join` | Join a room |
+| `POST` | `/meetings/{id}/join` | Join a room (authenticated) |
 | `POST` | `/meetings/{id}/leave` | Leave a room |
 | `GET` | `/meetings/{id}/participants` | Active participant list |
 | `PATCH` | `/meetings/{id}/participants/me/media` | Update own media state |
+| `POST` | `/meetings/{id}/participants/{participant_id}/mute` | Host mutes or unmutes a participant |
+| `DELETE` | `/meetings/{id}/participants/{participant_id}` | Host removes a participant |
 
 Meeting identifiers use the form `mtg_<32 hex characters>`. Short codes are derived from the first eight identifier characters and are formatted as `NM-XXXXXXXX`.
 
@@ -143,15 +181,17 @@ npm run build
 
 `render.yaml` contains a two-service Render blueprint for a small deployment:
 
-- FastAPI on a persistent disk for SQLite
+- FastAPI on a persistent disk for SQLite, started with `alembic upgrade head`
 - Next.js on a Node web service
 - Environment values marked for dashboard configuration instead of committed secrets
 
-Set the frontend build-time `NEXT_PUBLIC_API_URL` and backend `CORS_ORIGINS` to the actual deployed origins before building. For more than one backend instance, replace SQLite with a shared database and move participant presence/media signaling to a shared realtime service.
+Set the frontend build-time `NEXT_PUBLIC_API_URL` and backend `CORS_ORIGINS` to the actual deployed origins before building, and override `DEFAULT_USER_PASSWORD` in the dashboard. For more than one backend instance, replace SQLite with a shared database and move participant presence/media signaling to a shared realtime service.
 
 ## Known limitations
 
 - Remote WebRTC audio/video is not implemented. The room intentionally shows local video and synchronized participant/media metadata; it does not fake remote video tiles.
-- The development identity header is not authentication. Replace `DefaultUserIdentityProvider` with session/JWT validation before exposing the service publicly.
+- Host mute and removal are enforced as server-side participant state. Physically muting a remote microphone, and denying camera/mic permission, require a WebRTC signaling channel and permission policies that are out of scope here.
+- There is no rate limiting, password reset, email verification, or multi-factor authentication; add them before public launch.
 - SQLite is appropriate for local development and a single API instance, not high-concurrency production workloads.
 - Scheduled-time transitions are evaluated when a join request arrives; a background worker can be added for automatic status changes and notifications.
+- Session cleanup runs on login/registration rather than on a scheduler, so stale rows may linger until the next sign-in.

@@ -1,20 +1,22 @@
 "use client";
 
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { useRouter } from "next/navigation";
-import { ArrowLeft, Camera, CameraOff, Copy, Info, Mic, MicOff, PhoneOff, ShieldCheck, UsersRound, Video } from "lucide-react";
+import { ArrowLeft, Camera, CameraOff, Copy, Info, Mic, MicOff, PhoneOff, ShieldCheck, Square, UsersRound, Video } from "lucide-react";
 import { Avatar } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
 import { LoadingState } from "@/components/ui/loading";
+import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import { ParticipantPanel } from "@/components/room/participant-panel";
 import { LocalVideo } from "@/components/room/local-video";
 import { PrejoinScreen } from "@/components/room/prejoin-screen";
 import { useLocalMedia } from "@/hooks/use-local-media";
 import { useMeeting } from "@/hooks/use-meeting";
 import { meetingService } from "@/services/meeting-service";
+import { ApiError } from "@/services/api";
 import { formatMeetingRange } from "@/lib/date";
-import { useCurrentUser } from "@/providers/current-user-provider";
-import type { Meeting } from "@/lib/types";
+import { useAuth } from "@/providers/auth-provider";
+import type { Meeting, Participant } from "@/lib/types";
 
 function RoomControl({ label, active, danger = false, disabled = false, onClick, children }: { label: string; active: boolean; danger?: boolean; disabled?: boolean; onClick: () => void; children: ReactNode }) {
   return <button type="button" disabled={disabled} onClick={onClick} className={`group flex min-w-[48px] flex-col items-center gap-1.5 text-[10px] font-semibold transition disabled:cursor-not-allowed disabled:opacity-40 ${danger ? "text-[#ffb4b7] hover:text-white" : "text-white/60 hover:text-white"}`} aria-label={label} aria-pressed={active}><span className={`flex h-11 w-11 items-center justify-center rounded-xl transition ${danger ? "bg-coral text-white hover:bg-[#c93a40]" : active ? "bg-white/15 text-white" : "bg-white/10 text-white/75 group-hover:bg-white/15"}`}>{children}</span><span className="hidden sm:block">{label}</span></button>;
@@ -22,7 +24,7 @@ function RoomControl({ label, active, danger = false, disabled = false, onClick,
 
 export function MeetingRoom({ meetingId }: { meetingId: string }) {
   const router = useRouter();
-  const { user } = useCurrentUser();
+  const { user, signOut } = useAuth();
   const { meeting, status, error, refresh } = useMeeting(meetingId);
   const media = useLocalMedia();
   const [phase, setPhase] = useState<"prejoin" | "room">("prejoin");
@@ -33,8 +35,27 @@ export function MeetingRoom({ meetingId }: { meetingId: string }) {
   const [roomError, setRoomError] = useState<string | null>(null);
   const [isJoining, setIsJoining] = useState(false);
   const [roomMeeting, setRoomMeeting] = useState<Meeting | null>(null);
+  const [pendingParticipantId, setPendingParticipantId] = useState<string | null>(null);
+  const [removeTarget, setRemoveTarget] = useState<Participant | null>(null);
+  const [endDialogOpen, setEndDialogOpen] = useState(false);
+  const [isEnding, setIsEnding] = useState(false);
+  const [endedByHost, setEndedByHost] = useState(false);
+  const [removedByHost, setRemovedByHost] = useState(false);
   const joinedRef = useRef(false);
   const leaveSentRef = useRef(false);
+  const wasInActiveListRef = useRef(false);
+  const leaveRoom = useCallback(async () => {
+    if (joinedRef.current && !leaveSentRef.current) {
+      leaveSentRef.current = true;
+      try {
+        await meetingService.leaveMeeting(meetingId);
+      } catch {
+        setRoomError("The room could not be updated, but your local media is stopping.");
+      }
+    }
+    media.stop();
+    router.replace(`/meeting/${meetingId}`);
+  }, [meetingId, media, router]);
 
   useEffect(() => {
     if (meeting) setRoomMeeting(meeting);
@@ -52,26 +73,63 @@ export function MeetingRoom({ meetingId }: { meetingId: string }) {
     return () => window.clearInterval(interval);
   }, [phase, refresh]);
 
+  useEffect(() => {
+    if (phase !== "room" || !roomMeeting) return;
+    if (roomMeeting.status === "ended") {
+      setEndedByHost(true);
+      media.stop();
+      return;
+    }
+    if (user) {
+      const ownParticipant = roomMeeting.participants.find((participant) => participant.userId === user.id);
+      if (ownParticipant?.isRemoved) {
+        setRemovedByHost(true);
+        return;
+      }
+      if (ownParticipant) {
+        wasInActiveListRef.current = true;
+      } else if (wasInActiveListRef.current) {
+        // The server only drops a joined participant from the active list once the host removes them.
+        setRemovedByHost(true);
+      }
+    }
+  }, [phase, roomMeeting, media, user]);
+
   useEffect(() => () => {
     if (joinedRef.current && !leaveSentRef.current) {
       leaveSentRef.current = true;
-      void meetingService.leaveMeeting(meetingId, user.id);
+      void meetingService.leaveMeeting(meetingId).catch(() => undefined);
     }
-  }, [meetingId, user.id]);
+  }, [meetingId]);
+
+  function handleRequestError(requestError: unknown, fallback: string) {
+    if (requestError instanceof ApiError && requestError.status === 401) {
+      void signOut();
+      router.replace(`/login?next=${encodeURIComponent(`/meeting/${meetingId}/room`)}`);
+      return;
+    }
+    if (requestError instanceof ApiError && requestError.code === "PARTICIPANT_REMOVED") {
+      setRemovedByHost(true);
+      return;
+    }
+    setRoomError(requestError instanceof Error ? requestError.message : fallback);
+  }
 
   async function joinRoom(displayName: string) {
     setJoinError(null);
     setRoomError(null);
     setIsJoining(true);
     try {
-      const joinedMeeting = await meetingService.joinMeeting(meetingId, displayName, user.id);
+      const joinedMeeting = await meetingService.joinMeeting(meetingId, displayName);
       joinedRef.current = true;
       leaveSentRef.current = false;
+      setRemovedByHost(false);
+      setEndedByHost(false);
       setRoomMeeting(joinedMeeting);
       setElapsed(0);
       setPhase("room");
       try {
-        await meetingService.updateMediaState(meetingId, user.id, {
+        await meetingService.updateMediaState(meetingId, {
           audio_enabled: media.micEnabled,
           video_enabled: media.cameraEnabled,
         });
@@ -79,23 +137,14 @@ export function MeetingRoom({ meetingId }: { meetingId: string }) {
         setRoomError("You joined the room, but your media status could not be synced.");
       }
     } catch (requestError) {
+      if (requestError instanceof ApiError && requestError.status === 401) {
+        setJoinError("Your session expired. Sign in again to join this meeting.");
+        return;
+      }
       setJoinError(requestError instanceof Error ? requestError.message : "We could not join this meeting. Please try again.");
     } finally {
       setIsJoining(false);
     }
-  }
-
-  async function leaveRoom() {
-    if (joinedRef.current && !leaveSentRef.current) {
-      leaveSentRef.current = true;
-      try {
-        await meetingService.leaveMeeting(meetingId, user.id);
-      } catch {
-        setRoomError("The room could not be updated, but your local media is stopping.");
-      }
-    }
-    media.stop();
-    router.replace(`/meeting/${meetingId}`);
   }
 
   function leaveBeforeJoin() {
@@ -107,7 +156,7 @@ export function MeetingRoom({ meetingId }: { meetingId: string }) {
     const stream = await media.start();
     if (joinedRef.current && stream) {
       try {
-        await meetingService.updateMediaState(meetingId, user.id, {
+        await meetingService.updateMediaState(meetingId, {
           audio_enabled: stream.getAudioTracks().some((track) => track.enabled),
           video_enabled: stream.getVideoTracks().some((track) => track.enabled),
         });
@@ -118,26 +167,73 @@ export function MeetingRoom({ meetingId }: { meetingId: string }) {
   }
 
   async function toggleMicrophone() {
+    if (removedByHost) return;
     const nextEnabled = !media.micEnabled;
     media.toggleMic();
     if (!joinedRef.current) return;
     try {
-      await meetingService.updateMediaState(meetingId, user.id, { audio_enabled: nextEnabled });
-    } catch {
+      await meetingService.updateMediaState(meetingId, { audio_enabled: nextEnabled });
+    } catch (requestError) {
       media.toggleMic();
-      setRoomError("Your microphone could not be updated for everyone.");
+      handleRequestError(requestError, "Your microphone could not be updated for everyone.");
     }
   }
 
   async function toggleCamera() {
+    if (removedByHost) return;
     const nextEnabled = !media.cameraEnabled;
     media.toggleCamera();
     if (!joinedRef.current) return;
     try {
-      await meetingService.updateMediaState(meetingId, user.id, { video_enabled: nextEnabled });
-    } catch {
+      await meetingService.updateMediaState(meetingId, { video_enabled: nextEnabled });
+    } catch (requestError) {
       media.toggleCamera();
-      setRoomError("Your camera could not be updated for everyone.");
+      handleRequestError(requestError, "Your camera could not be updated for everyone.");
+    }
+  }
+
+  async function toggleParticipantMute(participant: Participant) {
+    setPendingParticipantId(participant.id);
+    setRoomError(null);
+    try {
+      await meetingService.setParticipantMute(meetingId, participant.id, !participant.isMuted);
+      await refresh({ silent: true });
+    } catch (requestError) {
+      handleRequestError(requestError, `We could not ${participant.isMuted ? "unmute" : "mute"} ${participant.name}.`);
+    } finally {
+      setPendingParticipantId(null);
+    }
+  }
+
+  async function confirmRemoveParticipant() {
+    if (!removeTarget) return;
+    const target = removeTarget;
+    setPendingParticipantId(target.id);
+    try {
+      await meetingService.removeParticipant(meetingId, target.id);
+      setRemoveTarget(null);
+      setPanelOpen(false);
+      await refresh({ silent: true });
+    } catch (requestError) {
+      handleRequestError(requestError, `We could not remove ${target.name} from this meeting.`);
+    } finally {
+      setPendingParticipantId(null);
+      setRemoveTarget(null);
+    }
+  }
+
+  async function confirmEndMeeting() {
+    setIsEnding(true);
+    try {
+      const endedMeeting = await meetingService.endMeeting(meetingId);
+      setRoomMeeting(endedMeeting);
+      setEndDialogOpen(false);
+      setEndedByHost(true);
+      media.stop();
+    } catch (requestError) {
+      handleRequestError(requestError, "We could not end this meeting for everyone.");
+    } finally {
+      setIsEnding(false);
     }
   }
 
@@ -167,16 +263,20 @@ export function MeetingRoom({ meetingId }: { meetingId: string }) {
 
   if (status === "loading") return <div className="min-h-screen bg-[#202124] text-white"><div className="flex min-h-screen items-center justify-center"><LoadingState label="Preparing your room" /></div></div>;
   if (status === "error" || !meeting) return <div className="flex min-h-screen items-center justify-center bg-[#202124] px-5 text-white"><div className="max-w-md text-center"><h1 className="text-2xl font-bold">Room unavailable</h1><p className="mt-3 text-sm leading-6 text-white/60">{error ?? "This meeting could not be loaded."}</p><Button className="mt-6" onClick={() => void refresh()}>Try again</Button></div></div>;
+  if (!user) return null;
 
   const currentMeeting = roomMeeting ?? meeting;
+  const isHost = currentMeeting.host.id === user.id;
   const scheduledTimeReached = currentMeeting.status === "upcoming" && new Date(currentMeeting.startTime).getTime() <= Date.now();
-  const canJoin = currentMeeting.status === "live" || (currentMeeting.status === "upcoming" && (currentMeeting.host.id === user.id || scheduledTimeReached));
+  const canJoin = currentMeeting.status === "live" || (currentMeeting.status === "upcoming" && (isHost || scheduledTimeReached));
   if (phase === "prejoin") return <PrejoinScreen meeting={currentMeeting} media={media} defaultDisplayName={user.name} initials={user.initials} onJoin={joinRoom} onLeave={leaveBeforeJoin} joinError={joinError} isJoining={isJoining} canJoin={canJoin} />;
 
-  const onlineParticipants = currentMeeting.participants.filter((participant) => participant.isOnline || participant.userId === user.id);
+  const activeParticipants = currentMeeting.participants.filter((participant) => !participant.isRemoved);
+  const onlineParticipants = activeParticipants.filter((participant) => participant.isOnline || participant.userId === user.id);
   const remoteParticipants = onlineParticipants.filter((participant) => participant.userId !== user.id);
   const minutes = Math.floor(elapsed / 60).toString().padStart(2, "0");
   const seconds = (elapsed % 60).toString().padStart(2, "0");
+  const roomIsClosed = endedByHost || currentMeeting.status === "ended";
 
   return (
     <div className="min-h-screen bg-[#202124] text-white">
@@ -191,7 +291,26 @@ export function MeetingRoom({ meetingId }: { meetingId: string }) {
         </div>
       </header>
       <main className="relative flex min-h-[calc(100vh-64px)] flex-col p-3 sm:p-5">
-        {roomError ? <div className="mb-4 flex items-center justify-between gap-3 rounded-xl border border-[#f5b544]/30 bg-[#f5b544]/10 px-4 py-3 text-sm text-[#ffe5a0]" role="alert"><span>{roomError}</span><button type="button" className="font-semibold underline" onClick={() => setRoomError(null)}>Dismiss</button></div> : null}
+        {roomIsClosed || removedByHost ? (
+          <div className="mb-4 flex flex-col gap-2 rounded-xl border border-white/15 bg-white/[0.06] px-4 py-3 text-sm text-white/80 sm:flex-row sm:items-center sm:justify-between" role="status">
+            <span>
+              {removedByHost
+                ? "You were removed from this meeting by the host."
+                : "This meeting has ended. Local media has been stopped."}
+            </span>
+            <button
+              type="button"
+              onClick={() => {
+                media.stop();
+                router.replace(`/meeting/${meetingId}`);
+              }}
+              className="self-start font-semibold text-mint underline sm:self-auto"
+            >
+              Back to meeting details
+            </button>
+          </div>
+        ) : null}
+        {roomError && !roomIsClosed && !removedByHost ? <div className="mb-4 flex items-center justify-between gap-3 rounded-xl border border-[#f5b544]/30 bg-[#f5b544]/10 px-4 py-3 text-sm text-[#ffe5a0]" role="alert"><span>{roomError}</span><button type="button" className="font-semibold underline" onClick={() => setRoomError(null)}>Dismiss</button></div> : null}
         <div className="relative flex min-h-[480px] flex-1 overflow-hidden rounded-2xl border border-white/10 bg-[#2d3136] p-2 shadow-2xl sm:p-3">
           <div className="grid min-h-0 flex-1 gap-2 lg:grid-cols-[minmax(0,1fr)_250px]">
             <div className="relative min-h-[360px] overflow-hidden rounded-xl bg-[#181a1d] sm:min-h-[520px]">
@@ -208,16 +327,45 @@ export function MeetingRoom({ meetingId }: { meetingId: string }) {
         </div>
         <div className="mt-4 flex flex-col items-center justify-between gap-4 sm:flex-row">
           <div className="flex items-center gap-1.5 sm:gap-3">
-            {!media.stream ? <RoomControl label={media.isStarting ? "Connecting" : "Enable media"} active={false} disabled={media.isStarting} onClick={() => void startMedia()}><Camera className="h-5 w-5" aria-hidden="true" /></RoomControl> : null}
-            <RoomControl label={media.micEnabled ? "Mute" : "Unmute"} active={media.micEnabled} disabled={!media.stream} onClick={() => void toggleMicrophone()}><span className={!media.micEnabled ? "rounded-full bg-coral/20 p-1" : ""}>{media.micEnabled ? <Mic className="h-5 w-5" aria-hidden="true" /> : <MicOff className="h-5 w-5" aria-hidden="true" />}</span></RoomControl>
-            <RoomControl label={media.cameraEnabled ? "Camera" : "Camera off"} active={media.cameraEnabled} disabled={!media.stream} onClick={() => void toggleCamera()}><span className={!media.cameraEnabled ? "rounded-full bg-coral/20 p-1" : ""}>{media.cameraEnabled ? <Camera className="h-5 w-5" aria-hidden="true" /> : <CameraOff className="h-5 w-5" aria-hidden="true" />}</span></RoomControl>
+            {!media.stream && !roomIsClosed && !removedByHost ? <RoomControl label={media.isStarting ? "Connecting" : "Enable media"} active={false} disabled={media.isStarting} onClick={() => void startMedia()}><Camera className="h-5 w-5" aria-hidden="true" /></RoomControl> : null}
+            <RoomControl label={media.micEnabled ? "Mute" : "Unmute"} active={media.micEnabled} disabled={!media.stream || roomIsClosed || removedByHost} onClick={() => void toggleMicrophone()}><span className={!media.micEnabled ? "rounded-full bg-coral/20 p-1" : ""}>{media.micEnabled ? <Mic className="h-5 w-5" aria-hidden="true" /> : <MicOff className="h-5 w-5" aria-hidden="true" />}</span></RoomControl>
+            <RoomControl label={media.cameraEnabled ? "Camera" : "Camera off"} active={media.cameraEnabled} disabled={!media.stream || roomIsClosed || removedByHost} onClick={() => void toggleCamera()}><span className={!media.cameraEnabled ? "rounded-full bg-coral/20 p-1" : ""}>{media.cameraEnabled ? <Camera className="h-5 w-5" aria-hidden="true" /> : <CameraOff className="h-5 w-5" aria-hidden="true" />}</span></RoomControl>
             <RoomControl label="People" active={panelOpen} onClick={() => setPanelOpen((current) => !current)}><UsersRound className="h-5 w-5" aria-hidden="true" /></RoomControl>
+            {isHost && !roomIsClosed ? <RoomControl label="End for all" active={false} danger disabled={isEnding} onClick={() => setEndDialogOpen(true)}><Square className="h-4 w-4" aria-hidden="true" /></RoomControl> : null}
           </div>
           <RoomControl label="Leave" active={false} danger onClick={() => void leaveRoom()}><PhoneOff className="h-5 w-5" aria-hidden="true" /></RoomControl>
           <div className="hidden items-center gap-2 text-xs text-white/40 sm:flex"><Info className="h-4 w-4" aria-hidden="true" />Camera and mic controls work locally</div>
         </div>
-        <ParticipantPanel participants={onlineParticipants} open={panelOpen} onClose={() => setPanelOpen(false)} />
+        <ParticipantPanel
+          participants={onlineParticipants}
+          open={panelOpen}
+          canManageParticipants={isHost && !roomIsClosed}
+          pendingParticipantId={pendingParticipantId}
+          onClose={() => setPanelOpen(false)}
+          onToggleMute={(participant) => void toggleParticipantMute(participant)}
+          onRemoveParticipant={(participant) => setRemoveTarget(participant)}
+        />
       </main>
+      <ConfirmDialog
+        open={Boolean(removeTarget)}
+        title={`Remove ${removeTarget?.name ?? "participant"}?`}
+        description="They will be removed from the participant list and can no longer rejoin this meeting. This cannot be undone."
+        confirmLabel="Remove participant"
+        destructive
+        isConfirming={pendingParticipantId === removeTarget?.id}
+        onCancel={() => setRemoveTarget(null)}
+        onConfirm={() => void confirmRemoveParticipant()}
+      />
+      <ConfirmDialog
+        open={endDialogOpen}
+        title="End meeting for everyone?"
+        description="The meeting closes for every participant and the room becomes read-only. You can still review the details afterwards."
+        confirmLabel="End meeting"
+        destructive
+        isConfirming={isEnding}
+        onCancel={() => setEndDialogOpen(false)}
+        onConfirm={() => void confirmEndMeeting()}
+      />
     </div>
   );
 }

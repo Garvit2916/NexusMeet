@@ -17,29 +17,20 @@ export class ApiError extends Error implements ApiErrorShape {
   }
 }
 
-type ApiRequestOptions = {
-  userId?: string;
-};
-
-export async function apiRequest<T>(
-  path: string,
-  init: RequestInit = {},
-  options: ApiRequestOptions = {},
-): Promise<T> {
+export async function apiRequest<T>(path: string, init: RequestInit = {}): Promise<T> {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 8000);
   const headers = new Headers(init.headers);
   if (init.body && !headers.has("Content-Type")) {
     headers.set("Content-Type", "application/json");
   }
-  if (options.userId && !headers.has("X-User-ID")) {
-    headers.set("X-User-ID", options.userId);
-  }
 
   try {
     const response = await fetch(`${apiBaseUrl}${path}`, {
       ...init,
       headers,
+      // Authentication is an HTTP-only session cookie managed by the browser.
+      credentials: "include",
       signal: controller.signal,
     });
     const body = (await response.json().catch(() => null)) as

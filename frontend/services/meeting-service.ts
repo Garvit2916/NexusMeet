@@ -1,6 +1,7 @@
-import type { ApiMeeting, ApiMeetingList, ApiParticipant, ApiUser } from "@/lib/api-types";
+import type { ApiMeeting, ApiMeetingList, ApiParticipant } from "@/lib/api-types";
 import { apiRequest, ApiError } from "./api";
-import type { CreateMeetingInput, Meeting, MeetingListResponse, MeetingStatus, Participant, User } from "@/lib/types";
+import { normalizeUser } from "@/services/auth-service";
+import type { CreateMeetingInput, Meeting, MeetingListResponse, MeetingStatus, Participant } from "@/lib/types";
 
 function initialsFor(name: string) {
   const pieces = name.split(" ").filter(Boolean);
@@ -9,21 +10,11 @@ function initialsFor(name: string) {
   return `${pieces[0][0]}${pieces.at(-1)?.[0] ?? ""}`.toUpperCase();
 }
 
-function normalizeUser(raw: ApiUser, fallbackRole: User["role"] = "attendee"): User {
-  const name = raw.name.trim() || "Guest";
-  return {
-    id: raw.id,
-    name,
-    email: raw.email,
-    initials: raw.initials || initialsFor(name),
-    role: raw.role === "host" || raw.role === "presenter" ? raw.role : fallbackRole,
-    avatarUrl: raw.avatar_url ?? raw.avatarUrl ?? undefined,
-  };
-}
-
 function normalizeParticipant(raw: ApiParticipant): Participant {
   const name = raw.display_name?.trim() || raw.name?.trim() || raw.user.name.trim() || "Guest";
   const role = raw.role === "host" || raw.role === "presenter" ? raw.role : "attendee";
+  const isRemoved = raw.is_removed ?? Boolean(raw.removed_at);
+  const isMuted = raw.is_muted ?? false;
   return {
     id: String(raw.id),
     userId: raw.user_id || raw.user.id,
@@ -31,7 +22,10 @@ function normalizeParticipant(raw: ApiParticipant): Participant {
     email: raw.email || raw.user.email,
     initials: raw.initials || initialsFor(name),
     role,
-    isOnline: raw.is_online ?? Boolean(raw.joined_at && !raw.left_at),
+    isOnline: (raw.is_online ?? Boolean(raw.joined_at && !raw.left_at)) && !isRemoved,
+    isMuted,
+    mutedByHost: raw.muted_by_host ?? (isMuted && raw.audio_enabled === false),
+    isRemoved,
     audioEnabled: raw.audio_enabled ?? true,
     videoEnabled: raw.video_enabled ?? true,
     screenSharing: raw.screen_sharing ?? false,
@@ -126,25 +120,54 @@ export const meetingService = {
     return normalizeMeeting(raw);
   },
 
-  async joinMeeting(meetingId: string, displayName: string, userId?: string): Promise<Meeting> {
+  async joinMeeting(meetingId: string, displayName: string): Promise<Meeting> {
     const raw = await apiRequest<ApiMeeting>(`/meetings/${encodeURIComponent(meetingId)}/join`, {
       method: "POST",
       body: JSON.stringify({ display_name: displayName }),
-    }, { userId });
+    });
     return normalizeMeeting(raw);
   },
 
-  async leaveMeeting(meetingId: string, userId?: string): Promise<Meeting> {
+  async leaveMeeting(meetingId: string): Promise<Meeting> {
     const raw = await apiRequest<ApiMeeting>(`/meetings/${encodeURIComponent(meetingId)}/leave`, {
       method: "POST",
-    }, { userId });
+    });
     return normalizeMeeting(raw);
   },
 
-  async updateMediaState(meetingId: string, userId: string, state: { audio_enabled?: boolean; video_enabled?: boolean }): Promise<void> {
+  async updateMediaState(
+    meetingId: string,
+    state: { audio_enabled?: boolean; video_enabled?: boolean; screen_sharing?: boolean },
+  ): Promise<void> {
     await apiRequest(`/meetings/${encodeURIComponent(meetingId)}/participants/me/media`, {
       method: "PATCH",
       body: JSON.stringify(state),
-    }, { userId });
+    });
+  },
+
+  async setParticipantMute(meetingId: string, participantId: string, muted: boolean): Promise<Participant> {
+    const raw = await apiRequest<ApiParticipant>(
+      `/meetings/${encodeURIComponent(meetingId)}/participants/${encodeURIComponent(participantId)}/mute`,
+      {
+        method: "POST",
+        body: JSON.stringify({ muted }),
+      },
+    );
+    return normalizeParticipant(raw);
+  },
+
+  async removeParticipant(meetingId: string, participantId: string): Promise<Participant> {
+    const raw = await apiRequest<ApiParticipant>(
+      `/meetings/${encodeURIComponent(meetingId)}/participants/${encodeURIComponent(participantId)}`,
+      { method: "DELETE" },
+    );
+    return normalizeParticipant(raw);
+  },
+
+  async endMeeting(meetingId: string): Promise<Meeting> {
+    const raw = await apiRequest<ApiMeeting>(`/meetings/${encodeURIComponent(meetingId)}/end`, {
+      method: "POST",
+    });
+    return normalizeMeeting(raw);
   },
 };

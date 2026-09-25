@@ -3,17 +3,19 @@
 import Link from "next/link";
 import { FormEvent, useState } from "react";
 import { useRouter } from "next/navigation";
-import { Bell, ChevronDown, HelpCircle, Search, X } from "lucide-react";
+import { Bell, ChevronDown, HelpCircle, LogOut, Search, X } from "lucide-react";
 import { Avatar } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
-import { useCurrentUser } from "@/providers/current-user-provider";
+import { useAuth } from "@/providers/auth-provider";
 
 export function Topbar() {
   const router = useRouter();
-  const { user } = useCurrentUser();
+  const { user, signOut } = useAuth();
   const [query, setQuery] = useState("");
   const [helpOpen, setHelpOpen] = useState(false);
   const [notificationsOpen, setNotificationsOpen] = useState(false);
+  const [accountOpen, setAccountOpen] = useState(false);
+  const [isSigningOut, setIsSigningOut] = useState(false);
 
   function submitSearch(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -41,11 +43,42 @@ export function Topbar() {
           <Button variant="ghost" size="icon" aria-label="Open notifications" aria-expanded={notificationsOpen} onClick={() => { setNotificationsOpen((current) => !current); setHelpOpen(false); }} className="relative"><Bell className="h-[18px] w-[18px]" aria-hidden="true" /><span className="absolute right-2 top-2 h-1.5 w-1.5 rounded-full bg-coral" aria-hidden="true" /></Button>
           {notificationsOpen ? <div className="absolute right-0 top-12 z-40 w-72 rounded-2xl border border-line bg-white p-4 shadow-float" role="dialog" aria-label="Notifications"><div className="flex items-center justify-between"><p className="text-sm font-bold text-ink">Notifications</p><button type="button" onClick={() => setNotificationsOpen(false)} className="text-muted hover:text-ink" aria-label="Close notifications"><X className="h-4 w-4" aria-hidden="true" /></button></div><div className="mt-4 rounded-xl bg-canvas p-3"><div className="flex gap-3"><span className="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-[#fff4d9] text-[#8a6416]"><Bell className="h-4 w-4" aria-hidden="true" /></span><div><p className="text-xs font-bold text-ink">You’re all caught up</p><p className="mt-1 text-xs leading-5 text-muted">New room activity will show up here.</p></div></div></div></div> : null}
         </div>
-        <Link href="/profile" className="ml-1 flex items-center gap-2 rounded-xl p-1.5 pr-2 transition hover:bg-canvas">
-          <Avatar initials={user.initials} name={user.name} size="sm" tone="mint" />
-          <span className="hidden text-left sm:block"><span className="block text-xs font-bold leading-4 text-ink">{user.name}</span><span className="block text-[10px] leading-3 text-muted">Workspace</span></span>
-          <ChevronDown className="hidden h-4 w-4 text-muted sm:block" aria-hidden="true" />
-        </Link>
+        <div className="relative">
+          <button
+            type="button"
+            onClick={() => { setAccountOpen((current) => !current); setHelpOpen(false); setNotificationsOpen(false); }}
+            className="ml-1 flex items-center gap-2 rounded-xl p-1.5 pr-2 transition hover:bg-canvas"
+            aria-label="Open account menu"
+            aria-expanded={accountOpen}
+          >
+            <Avatar initials={user?.initials ?? "NM"} name={user?.name ?? "Signed out"} size="sm" tone="mint" />
+            <span className="hidden text-left sm:block"><span className="block text-xs font-bold leading-4 text-ink">{user?.name ?? "Signed out"}</span><span className="block text-[10px] leading-3 text-muted">Workspace</span></span>
+            <ChevronDown className="hidden h-4 w-4 text-muted sm:block" aria-hidden="true" />
+          </button>
+          {accountOpen ? (
+            <div className="absolute right-0 top-12 z-40 w-64 rounded-2xl border border-line bg-white p-2 shadow-float" role="dialog" aria-label="Account menu">
+              <Link href="/profile" onClick={() => setAccountOpen(false)} className="block rounded-xl px-3 py-2.5 text-sm font-semibold text-ink transition hover:bg-canvas">Profile settings</Link>
+              <button
+                type="button"
+                disabled={isSigningOut}
+                onClick={async () => {
+                  setAccountOpen(false);
+                  setIsSigningOut(true);
+                  try {
+                    await signOut();
+                    router.replace("/login");
+                  } finally {
+                    setIsSigningOut(false);
+                  }
+                }}
+                className="flex w-full items-center gap-2 rounded-xl px-3 py-2.5 text-left text-sm font-semibold text-coral transition hover:bg-[#fff0f0] disabled:opacity-50"
+              >
+                <LogOut className="h-4 w-4" aria-hidden="true" />
+                {isSigningOut ? "Signing out…" : "Sign out"}
+              </button>
+            </div>
+          ) : null}
+        </div>
       </div>
     </header>
   );

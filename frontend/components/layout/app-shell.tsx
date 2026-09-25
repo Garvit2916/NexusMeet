@@ -6,11 +6,11 @@ import { Brand } from "@/components/layout/brand";
 import { MobileNav, NewMeetingButton, SidebarNav } from "@/components/layout/nav";
 import { Topbar } from "@/components/layout/topbar";
 import { Avatar } from "@/components/ui/avatar";
-import { useCurrentUser } from "@/providers/current-user-provider";
+import { useAuth } from "@/providers/auth-provider";
 
 export function AppShell({ children }: { children: ReactNode }) {
   const [sidebarOpen, setSidebarOpen] = useState(false);
-  const { user } = useCurrentUser();
+  const { user } = useAuth();
 
   return (
     <div className="min-h-screen bg-canvas text-ink">
@@ -28,8 +28,8 @@ export function AppShell({ children }: { children: ReactNode }) {
             <p className="mt-2 text-[11px] leading-4 text-muted">2 of 3 active meeting spaces used</p>
           </div>
           <div className="flex items-center gap-2.5 rounded-2xl border border-line p-2.5">
-            <Avatar initials={user.initials} name={user.name} size="sm" tone="mint" />
-            <div className="min-w-0 flex-1"><p className="truncate text-xs font-bold text-ink">{user.name}</p><p className="truncate text-[10px] text-muted">{user.email}</p></div>
+            <Avatar initials={user?.initials ?? "NM"} name={user?.name ?? "Signed out"} size="sm" tone="mint" />
+            <div className="min-w-0 flex-1"><p className="truncate text-xs font-bold text-ink">{user?.name ?? "Signed out"}</p><p className="truncate text-[10px] text-muted">{user?.email ?? ""}</p></div>
             <HelpCircle className="h-4 w-4 text-muted" aria-hidden="true" />
           </div>
         </div>

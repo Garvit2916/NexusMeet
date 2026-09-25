@@ -12,7 +12,7 @@ import { useMeeting } from "@/hooks/use-meeting";
 import { buildCalendarFile } from "@/lib/meeting-utils";
 import { formatDuration, formatMeetingDate, formatMeetingRange, formatMeetingWeekday } from "@/lib/date";
 import type { Meeting } from "@/lib/types";
-import { useCurrentUser } from "@/providers/current-user-provider";
+import { useAuth } from "@/providers/auth-provider";
 
 function meetingStatusTone(status: Meeting["status"]) {
   if (status === "live") return "mint" as const;
@@ -29,7 +29,7 @@ function meetingStatusLabel(status: Meeting["status"]) {
 }
 
 export function MeetingDetailsView({ meetingId }: { meetingId: string }) {
-  const { user } = useCurrentUser();
+  const { user } = useAuth();
   const { meeting, status, error, refresh } = useMeeting(meetingId);
   const [copied, setCopied] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
@@ -89,7 +89,7 @@ export function MeetingDetailsView({ meetingId }: { meetingId: string }) {
   if (status === "error" || !meeting) return <div className="min-h-screen bg-canvas px-5 py-16"><ErrorState message={error ?? "This meeting could not be found."} onRetry={() => void refresh()} /></div>;
 
   const scheduledTimeReached = meeting.status === "upcoming" && new Date(meeting.startTime).getTime() <= Date.now();
-  const canJoin = meeting.status === "live" || (meeting.status === "upcoming" && (meeting.host.id === user.id || scheduledTimeReached));
+  const canJoin = meeting.status === "live" || (meeting.status === "upcoming" && (meeting.host.id === user?.id || scheduledTimeReached));
 
   return (
     <div className="min-h-screen bg-canvas px-5 py-7 text-ink sm:px-8 lg:px-10">
