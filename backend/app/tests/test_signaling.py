@@ -243,6 +243,35 @@ def test_turn_credentials_are_only_exposed_when_configured() -> None:
     assert with_turn[0]["credential"] == "ephemeral-secret"
 
 
+def test_turn_aliases_and_multiple_urls_are_honoured() -> None:
+    # Providers document `TURN_URLS`/`TURN_PASSWORD`, so both spellings must
+    # work. A typo would otherwise silently leave every call STUN-only.
+    plural = ice_servers(
+        Settings(
+            ws_ticket_secret="s",
+            turn_urls="turn:one.example.com:3478,turns:two.example.com:5349",
+            turn_username="u",
+            turn_password="p",
+        )
+    )
+    assert plural[0]["urls"] == ["turn:one.example.com:3478", "turns:two.example.com:5349"]
+    assert plural[0]["username"] == "u"
+    assert plural[0]["credential"] == "p"
+
+    # STUN is still advertised after TURN so a direct path is preferred.
+    assert plural[-1]["urls"] == ["stun:stun.l.google.com:19302"]
+
+
+def test_turn_is_not_advertised_without_every_credential() -> None:
+    # A partial configuration would hand the browser a relay it cannot use.
+    for partial in (
+        Settings(ws_ticket_secret="s", turn_url="turn:t.example.com:3478"),
+        Settings(ws_ticket_secret="s", turn_url="turn:t.example.com:3478", turn_username="u"),
+        Settings(ws_ticket_secret="s", turn_username="u", turn_credential="p"),
+    ):
+        assert all("credential" not in server for server in ice_servers(partial))
+
+
 # --- inbound message validation --------------------------------------------
 
 

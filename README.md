@@ -172,6 +172,44 @@ Every inbound message is schema-validated, and an unknown type is rejected with 
 
 Host mute, removal, and end-meeting are ordinary authenticated REST calls listed in the API surface. Their effect reaches other browsers through the signaling channel as relayed media state, which is why a host mute actually disables the guest's microphone track.
 
+### NAT traversal
+
+Two browsers on the same network or the same NAT connect with STUN alone. Browsers on genuinely different networks often cannot, and no amount of client-side retrying will fix it: STUN only discovers a public address, it cannot relay media. A restrictive or symmetric NAT, or a firewall that blocks arbitrary UDP, leaves the pair with no common candidate, so the connection sits in `checking` and then fails.
+
+`TURN_URL`, `TURN_USERNAME`, and `TURN_CREDENTIAL` are therefore required for real-world connectivity. `TURN_URLS` and `TURN_PASSWORD` are accepted as aliases. All three are needed before TURN is advertised; a partial configuration is ignored rather than handing the browser an unusable relay. The credentials stay on the server and reach the browser only inside the authenticated ticket response, never in the frontend bundle. Prefer `turns:` on port 5349 where the provider supports it.
+
+### Connection recovery
+
+| Situation | Behaviour |
+| --- | --- |
+| `disconnected` | ICE is re-gathered in place; the peer is kept |
+| `failed`, or ICE `failed` | `restartIce()` up to 4 times, rate limited, then a real error is shown |
+| ICE before the peer is known | Held, then applied once the peer exists |
+| ICE before the remote description | Held, then flushed after `setRemoteDescription` |
+| Roster on reconnect | Authoritative: peers it no longer lists are closed |
+| Camera enabled after joining | Renegotiated, with glare resolved by rollback on the polite peer |
+| Track from a replaced connection | Ignored, so a stale connection cannot overwrite live state |
+
+A participant tile reports one of `live`, `connecting`, `camera-off`, or `failed` from the real connection and track state. A peer with no media is never presented as live, and the socket backoff only resets once media actually flows.
+
+### Diagnostics
+
+The media layer writes one structured line per event to the browser console, prefixed `[webrtc]`. This is how a failure that only reproduces between two real networks gets diagnosed, so it is on in production.
+
+Tickets, passwords, session cookies, SDP bodies, and candidate addresses are never logged; only message types, candidate types, byte counts, and connection states are.
+
+```
+[webrtc] ice-config  role=guest client=cteqd2u meeting=room-1 self=conn-b peer=- configured=STUN(1)
+[webrtc] peer        ... peer=conn-a event=created placeholder=false
+[webrtc] ice         ... peer=conn-a event=local-candidate type=host protocol=udp
+[webrtc] ice         ... peer=conn-a event=remote-candidate type=srflx
+[webrtc] peer        ... peer=conn-a event=connection-state connectionState=connected
+[webrtc] pair        ... peer=conn-a event=candidate-types types=host+srflx hasRelay=false
+[webrtc] pair        ... peer=conn-a event=selected state=succeeded bytesReceived=184320
+```
+
+`hasRelay=false` on a connection that never completes is the signature of missing TURN. `signal-error` and `ice-error` lines name the operation that was rejected, which is otherwise swallowed by the browser's promise.
+
 ### Security properties
 
 - Tickets are HMAC-SHA256 signed with `WS_TICKET_SECRET`, expire after `WS_TICKET_TTL_SECONDS` (120 by default), and are bound to one meeting and one user.

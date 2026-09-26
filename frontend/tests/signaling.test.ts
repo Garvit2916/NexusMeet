@@ -1,10 +1,12 @@
 import { describe, expect, it } from "vitest";
 import {
   buildSocketUrl,
+  remoteMediaState,
   resolveIceServers,
   shouldInitiateOffer,
   SIGNALING_ERROR_MESSAGES,
   SIGNALING_STATUS_TEXT,
+  type RemoteParticipant,
   type SignalingStatus,
 } from "@/lib/signaling";
 
@@ -87,5 +89,47 @@ describe("signaling copy", () => {
 
   it("explains an undeliverable target instead of leaking a protocol code", () => {
     expect(SIGNALING_ERROR_MESSAGES.UNKNOWN_TARGET).toMatch(/participant left/i);
+  });
+});
+
+describe("remoteMediaState", () => {
+  function participant(overrides: Partial<RemoteParticipant> = {}): RemoteParticipant {
+    return {
+      connectionId: "conn-b",
+      userId: "usr_b",
+      participantId: 2,
+      name: "Alex Guest",
+      isHost: false,
+      audioEnabled: true,
+      videoEnabled: true,
+      screenSharing: false,
+      stream: null,
+      connectionState: "new",
+      hasVideoTrack: false,
+      ...overrides,
+    };
+  }
+
+  it("reports live only once a video track has actually arrived", () => {
+    expect(remoteMediaState(participant({ hasVideoTrack: true }))).toBe("live");
+  });
+
+  it("reports a peer with no media yet as still connecting", () => {
+    expect(remoteMediaState(participant())).toBe("connecting");
+    expect(remoteMediaState(participant({ connectionState: "connecting" }))).toBe("connecting");
+  });
+
+  it("distinguishes a peer that switched its camera off from a broken one", () => {
+    expect(remoteMediaState(participant({ videoEnabled: false }))).toBe("camera-off");
+  });
+
+  it("reports a dead ICE layer as a lost connection rather than connecting forever", () => {
+    expect(remoteMediaState(participant({ iceConnectionState: "failed" }))).toBe("failed");
+    expect(remoteMediaState(participant({ connectionState: "failed" }))).toBe("failed");
+    expect(remoteMediaState(participant({ iceConnectionState: "closed" }))).toBe("failed");
+  });
+
+  it("treats an unknown peer as connecting rather than live", () => {
+    expect(remoteMediaState(undefined)).toBe("connecting");
   });
 });

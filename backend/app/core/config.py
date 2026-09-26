@@ -43,12 +43,21 @@ class Settings(BaseSettings):
     # configured explicitly instead of being derived from the request.
     public_ws_url: str | None = None
     stun_urls: str = "stun:stun.l.google.com:19302"
-    # TURN is optional. These values stay on the server and are handed to the
-    # browser only inside the signed ticket response, so a permanent TURN
+    # TURN is optional in code but effectively required in production: with
+    # STUN alone, two browsers behind symmetric NAT or a strict corporate
+    # firewall can never find a working candidate pair, and no amount of client
+    # side retrying will fix it. The values stay on the server and are handed to
+    # the browser only inside the signed ticket response, so a permanent TURN
     # credential is never committed to the frontend bundle.
+    #
+    # `TURN_URLS` and `TURN_PASSWORD` are accepted as aliases because those are
+    # the names most TURN providers document, and a typo here silently degrades
+    # every call to STUN-only rather than failing loudly.
     turn_url: str | None = None
     turn_username: str | None = None
     turn_credential: str | None = None
+    turn_urls: str | None = None
+    turn_password: str | None = None
 
     @field_validator("ws_ticket_secret", mode="before")
     @classmethod
@@ -87,8 +96,18 @@ class Settings(BaseSettings):
         return [url.strip() for url in self.stun_urls.split(",") if url.strip()]
 
     @property
+    def turn_url_list(self) -> list[str]:
+        """Every configured TURN URL, accepting either the singular or plural name."""
+        raw = self.turn_urls or self.turn_url or ""
+        return [url.strip() for url in raw.split(",") if url.strip()]
+
+    @property
+    def effective_turn_credential(self) -> str | None:
+        return self.turn_password or self.turn_credential
+
+    @property
     def has_turn_credentials(self) -> bool:
-        return bool(self.turn_url and self.turn_username and self.turn_credential)
+        return bool(self.turn_url_list and self.turn_username and self.effective_turn_credential)
 
     @property
     def uses_development_ws_secret(self) -> bool:

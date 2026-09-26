@@ -130,9 +130,9 @@ def ice_servers(settings: Settings) -> list[dict[str, Any]]:
     if settings.has_turn_credentials:
         servers.append(
             {
-                "urls": [url.strip() for url in str(settings.turn_url).split(",") if url.strip()],
+                "urls": settings.turn_url_list,
                 "username": settings.turn_username,
-                "credential": settings.turn_credential,
+                "credential": settings.effective_turn_credential,
             }
         )
     servers.extend({"urls": [url]} for url in settings.stun_url_list)

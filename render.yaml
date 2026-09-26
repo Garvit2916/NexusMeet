@@ -62,9 +62,11 @@ services:
       - key: STUN_URLS
         value: stun:stun.l.google.com:19302,stun:stun1.l.google.com:19302
       # TURN is what makes media work behind symmetric NAT and restrictive
-      # firewalls. Leave TURN_URL empty to run STUN-only, but real-world
-      # connectivity is then not guaranteed. Credentials are issued to clients
-      # through the authenticated ticket endpoint and are never bundled.
+      # firewalls. STUN only discovers public addresses, it cannot relay media,
+      # so with TURN_URL empty two browsers on some real networks will never
+      # connect no matter how long they retry. Set all three values.
+      # Credentials are issued to clients through the authenticated ticket
+      # endpoint and are never bundled into the frontend.
       - key: TURN_URL
         sync: false
       - key: TURN_USERNAME

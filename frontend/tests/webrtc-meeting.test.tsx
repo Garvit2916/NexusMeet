@@ -42,6 +42,7 @@ type FakeSender = { kind: string; track: FakeTrack | null; replaceTrack: (track:
  */
 class FakePeerConnection {
   connectionState: RTCPeerConnectionState = "new";
+  iceConnectionState: RTCIceConnectionState = "new";
   localDescription: unknown = null;
   remoteDescription: unknown = null;
   readonly addedTracks: FakeTrack[] = [];
@@ -50,10 +51,21 @@ class FakePeerConnection {
   ontrack: ((event: { streams: MediaStream[]; track: FakeTrack }) => void) | null = null;
   onicecandidate: ((event: { candidate: { toJSON: () => unknown } | null }) => void) | null = null;
   onconnectionstatechange: (() => void) | null = null;
+  oniceconnectionstatechange: (() => void) | null = null;
+  onnegotiationneeded: (() => void) | null = null;
   closed = false;
   /** When set, setRemoteDescription blocks until resolved by the test. */
   private remoteGate: Promise<void> | null = null;
   private resolveRemoteGate: (() => void) | null = null;
+
+  /** Re-gathering ICE must re-offer, exactly as a browser does. */
+  restartIce = vi.fn(() => {
+    this.onnegotiationneeded?.();
+  });
+
+  async getStats() {
+    return new Map();
+  }
 
   addTrack(track: FakeTrack) {
     this.addedTracks.push(track);
@@ -74,9 +86,20 @@ class FakePeerConnection {
   createOffer = vi.fn(async () => ({ type: "offer" as RTCSdpType, sdp: "offer-sdp" }));
   createAnswer = vi.fn(async () => ({ type: "answer" as RTCSdpType, sdp: "answer-sdp" }));
 
-  async setLocalDescription(description: unknown) {
-    this.localDescription = description;
+  /** When set, createOffer blocks until resolved by the test. */
+  private offerGate: Promise<void> | null = null;
+  private resolveOfferGate: (() => void) | null = null;
+
+  holdCreateOffer() {
+    this.offerGate = new Promise<void>((resolve) => {
+      this.resolveOfferGate = resolve;
+    });
+    return () => this.resolveOfferGate?.();
   }
+
+  setLocalDescription = vi.fn(async (description: unknown) => {
+    this.localDescription = description;
+  });
 
   setRemoteDescription(description: unknown) {
     if (!this.remoteGate) {
@@ -112,6 +135,15 @@ class FakePeerConnection {
   emitConnectionState(state: RTCPeerConnectionState) {
     this.connectionState = state;
     this.onconnectionstatechange?.();
+  }
+
+  emitIceState(state: RTCIceConnectionState) {
+    this.iceConnectionState = state;
+    this.oniceconnectionstatechange?.();
+  }
+
+  emitNegotiationNeeded() {
+    this.onnegotiationneeded?.();
   }
 }
 
@@ -404,13 +436,201 @@ describe("useWebRTCMeeting", () => {
     expect(onEnded).toHaveBeenCalled();
   });
 
-  it("drops and closes a peer whose connection fails", async () => {
+  it("keeps the peer and restarts ICE when the connection fails", async () => {
     const { view, connections, socket } = await connect();
     act(() => socket.emit({ type: "welcome", self: peer("conn-a"), peers: [peer("conn-b")], ice_servers: TICKET.iceServers }));
     await waitFor(() => expect(view.result.current.remoteParticipants).toHaveLength(1));
     act(() => connections[0].emitConnectionState("failed"));
+    // Deleting the peer here is what stranded the UI on "Connecting…" for the
+    // rest of the meeting, because no fresh roster ever arrives to rebuild it.
+    await waitFor(() => expect(connections[0].restartIce).toHaveBeenCalledTimes(1));
+    expect(view.result.current.remoteParticipants).toHaveLength(1);
+    expect(connections[0].closed).toBe(false);
+  });
+
+  it("restarts ICE when a connection only becomes disconnected", async () => {
+    const { view, connections, socket } = await connect();
+    act(() => socket.emit({ type: "welcome", self: peer("conn-a"), peers: [peer("conn-b")], ice_servers: TICKET.iceServers }));
+    await waitFor(() => expect(view.result.current.remoteParticipants).toHaveLength(1));
+    act(() => connections[0].emitConnectionState("disconnected"));
+    await waitFor(() => expect(connections[0].restartIce).toHaveBeenCalledTimes(1));
+    expect(connections[0].closed).toBe(false);
+  });
+
+  it("restarts ICE when the ICE layer itself fails", async () => {
+    const { connections, socket } = await connect();
+    act(() => socket.emit({ type: "welcome", self: peer("conn-a"), peers: [peer("conn-b")], ice_servers: TICKET.iceServers }));
+    await waitFor(() => expect(connections).toHaveLength(1));
+    act(() => connections[0].emitIceState("failed"));
+    await waitFor(() => expect(connections[0].restartIce).toHaveBeenCalledTimes(1));
+  });
+
+  it("rate limits ICE restarts so a broken pair cannot spin forever", async () => {
+    const { connections, socket } = await connect();
+    act(() => socket.emit({ type: "welcome", self: peer("conn-a"), peers: [peer("conn-b")], ice_servers: TICKET.iceServers }));
+    await waitFor(() => expect(connections).toHaveLength(1));
+    act(() => connections[0].emitConnectionState("disconnected"));
+    await waitFor(() => expect(connections[0].restartIce).toHaveBeenCalledTimes(1));
+    act(() => connections[0].emitConnectionState("disconnected"));
+    act(() => connections[0].emitConnectionState("disconnected"));
+    expect(connections[0].restartIce).toHaveBeenCalledTimes(1);
+  });
+
+  it("reports a real error once ICE restarts have stopped helping", async () => {
+    const onError = vi.fn();
+    const { connections, socket } = await connect({ onError });
+    act(() => socket.emit({ type: "welcome", self: peer("conn-a"), peers: [peer("conn-b")], ice_servers: TICKET.iceServers }));
+    await waitFor(() => expect(connections).toHaveLength(1));
+    vi.useFakeTimers();
+    try {
+      // Each round is far enough apart to clear the restart rate limit.
+      for (let round = 0; round < 6; round += 1) {
+        act(() => {
+          vi.setSystemTime(Date.now() + 5000);
+          connections[0].emitConnectionState("failed");
+        });
+      }
+    } finally {
+      vi.useRealTimers();
+    }
+    expect(connections[0].restartIce).toHaveBeenCalledTimes(4);
+    expect(onError).toHaveBeenCalledWith(expect.stringContaining("restrictive network"));
+  });
+
+  it("buffers ICE that arrives before the peer is even known", async () => {
+    const { connections, socket } = await connect();
+    act(() => socket.emit({ type: "welcome", self: peer("conn-b"), peers: [], ice_servers: TICKET.iceServers }));
+    // Candidates routinely outrun the roster; dropping them is unrecoverable.
+    act(() => socket.emit({ type: "ice-candidate", from: "conn-a", candidate: { candidate: "early-candidate" } }));
+    act(() => socket.emit({ type: "peer-joined", peer: peer("conn-a") }));
+    await waitFor(() => expect(connections).toHaveLength(1));
+    act(() => socket.emit({ type: "offer", from: "conn-a", sdp: { type: "offer", sdp: "remote-offer" } }));
+    await waitFor(() => expect(connections[0].appliedCandidates).toHaveLength(1));
+    expect(connections[0].appliedCandidates[0]).toMatchObject({ candidate: "early-candidate" });
+  });
+
+  it("closes a peer that a fresh roster no longer lists", async () => {
+    const { connections, socket, view } = await connect();
+    act(() =>
+      socket.emit({
+        type: "welcome",
+        self: peer("conn-a"),
+        peers: [peer("conn-b"), peer("conn-c")],
+        ice_servers: TICKET.iceServers,
+      }),
+    );
+    await waitFor(() => expect(view.result.current.remoteParticipants).toHaveLength(2));
+    // A reconnect re-delivers the roster, which is authoritative: conn-c is gone
+    // even though no `peer-left` ever arrived for it.
+    act(() => socket.emit({ type: "welcome", self: peer("conn-a"), peers: [peer("conn-b")], ice_servers: TICKET.iceServers }));
+    await waitFor(() => expect(view.result.current.remoteParticipants).toHaveLength(1));
+    expect(view.result.current.remoteParticipants[0].connectionId).toBe("conn-b");
+    expect(connections[1].closed).toBe(true);
+  });
+
+  it("upgrades a placeholder peer to the identity the roster provides", async () => {
+    const { connections, socket, view } = await connect();
+    act(() => socket.emit({ type: "welcome", self: peer("conn-b"), peers: [], ice_servers: TICKET.iceServers }));
+    // The offer beats the roster, so this peer starts out anonymous.
+    act(() => socket.emit({ type: "offer", from: "conn-a", sdp: { type: "offer", sdp: "remote-offer" } }));
+    await waitFor(() => expect(view.result.current.remoteParticipants).toHaveLength(1));
+    expect(view.result.current.remoteParticipants[0].name).toBe("Guest");
+    act(() => socket.emit({ type: "peer-joined", peer: peer("conn-a", { name: "Alex Guest", video_enabled: false }) }));
+    await waitFor(() => expect(view.result.current.remoteParticipants[0].name).toBe("Alex Guest"));
+    expect(view.result.current.remoteParticipants[0].videoEnabled).toBe(false);
+    // The negotiated connection must survive the identity upgrade.
+    expect(connections).toHaveLength(1);
+    expect(connections[0].closed).toBe(false);
+  });
+
+  it("renegotiates when a camera is enabled after joining", async () => {
+    FakeSocket.instances = [];
+    const connections: FakePeerConnection[] = [];
+    const audioOnly = new FakeStream([new FakeTrack("audio", "mic-1")]);
+    const withCamera = new FakeStream([new FakeTrack("audio", "mic-1"), new FakeTrack("video", "cam-1")]);
+
+    const view = renderHook(
+      (props: { stream: FakeStream }) =>
+        useWebRTCMeeting({
+          meetingId: "room-1",
+          enabled: true,
+          localStream: props.stream as unknown as MediaStream,
+          createSocket: (url) => new FakeSocket(url) as unknown as WebSocket,
+          createPeerConnection: () => {
+            const connection = new FakePeerConnection();
+            connections.push(connection);
+            return connection as unknown as RTCPeerConnection;
+          },
+          createMediaStream: () => new FakeStream() as unknown as MediaStream,
+          requestTicket: async () => TICKET,
+        }),
+      { initialProps: { stream: audioOnly } },
+    );
+    await waitFor(() => expect(FakeSocket.instances).toHaveLength(1));
+    const socket = FakeSocket.instances[0];
+    act(() => socket.open());
+    act(() => socket.emit({ type: "welcome", self: peer("conn-a"), peers: [peer("conn-b")], ice_servers: TICKET.iceServers }));
+    await waitFor(() => expect(connections[0].addedTracks).toHaveLength(1));
+    // Complete the first negotiation, as the real answer would.
+    act(() => socket.emit({ type: "answer", from: "conn-b", sdp: { type: "answer", sdp: "remote-answer" } }));
+    await waitFor(() => expect(connections[0].remoteDescription).not.toBeNull());
+
+    // The user then turns their camera on.
+    view.rerender({ stream: withCamera });
+    await waitFor(() => expect(connections[0].getSenders()).toHaveLength(2));
+    act(() => connections[0].emitNegotiationNeeded());
+    // Without this the other browser keeps showing "No camera" for the whole call.
+    await waitFor(() => expect(connections[0].createOffer).toHaveBeenCalled());
+    expect(socket.sent.some((message) => message.type === "offer")).toBe(true);
+  });
+
+  it("rolls back its own offer when both sides renegotiate at once", async () => {
+    const { connections, socket, view } = await connect();
+    // conn-b is the polite peer because conn-a owns the initial offer.
+    act(() => socket.emit({ type: "welcome", self: peer("conn-b"), peers: [peer("conn-a")], ice_servers: TICKET.iceServers }));
+    await waitFor(() => expect(view.result.current.remoteParticipants).toHaveLength(1));
+    act(() => socket.emit({ type: "offer", from: "conn-a", sdp: { type: "offer", sdp: "remote-offer" } }));
+    await waitFor(() => expect(socket.sent.some((message) => message.type === "answer")).toBe(true));
+
+    // A local renegotiation starts and stalls, then the remote offer arrives.
+    const release = connections[0].holdCreateOffer();
+    act(() => connections[0].emitNegotiationNeeded());
+    act(() => socket.emit({ type: "offer", from: "conn-a", sdp: { type: "offer", sdp: "glare-offer" } }));
+    await act(async () => {
+      release();
+    });
+    await waitFor(() =>
+      expect(connections[0].setLocalDescription).toHaveBeenCalledWith({ type: "rollback" }),
+    );
+    await waitFor(() => expect(connections[0].remoteDescription).toMatchObject({ sdp: "glare-offer" }));
+  });
+
+  it("ignores events from a connection that has already been replaced", async () => {
+    const { connections, socket, view } = await connect();
+    act(() => socket.emit({ type: "welcome", self: peer("conn-b"), peers: [peer("conn-a")], ice_servers: TICKET.iceServers }));
+    await waitFor(() => expect(connections).toHaveLength(1));
+    act(() => socket.emit({ type: "peer-left", connection_id: "conn-a" }));
     await waitFor(() => expect(view.result.current.remoteParticipants).toHaveLength(0));
-    expect(connections[0].closed).toBe(true);
+    act(() => socket.emit({ type: "peer-joined", peer: peer("conn-a") }));
+    await waitFor(() => expect(connections).toHaveLength(2));
+
+    // The discarded connection fires a late track event.
+    act(() => connections[0].emitRemoteTrack(new FakeStream([new FakeTrack("video")]), new FakeTrack("video")));
+    expect(view.result.current.remoteParticipants[0].hasVideoTrack).toBe(false);
+
+    // The live connection is unaffected and still delivers media.
+    act(() => connections[1].emitRemoteTrack(new FakeStream([new FakeTrack("video")]), new FakeTrack("video")));
+    await waitFor(() => expect(view.result.current.remoteParticipants[0].hasVideoTrack).toBe(true));
+  });
+
+  it("reports no video track until one actually arrives", async () => {
+    const { view, connections, socket } = await connect();
+    act(() => socket.emit({ type: "welcome", self: peer("conn-a"), peers: [peer("conn-b")], ice_servers: TICKET.iceServers }));
+    await waitFor(() => expect(connections).toHaveLength(1));
+    // The stream object exists from the moment the peer is created, but it is
+    // empty, so the UI must not claim to be showing video.
+    await waitFor(() => expect(view.result.current.remoteParticipants[0].stream).not.toBeNull());
+    expect(view.result.current.remoteParticipants[0].hasVideoTrack).toBe(false);
   });
 
   it("removes a peer that leaves", async () => {

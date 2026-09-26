@@ -16,7 +16,7 @@ import { useWebRTCMeeting } from "@/hooks/use-webrtc-meeting";
 import { meetingService } from "@/services/meeting-service";
 import { ApiError } from "@/services/api";
 import { formatMeetingRange } from "@/lib/date";
-import { SIGNALING_STATUS_TEXT, type RemoteParticipant } from "@/lib/signaling";
+import { remoteMediaState, SIGNALING_STATUS_TEXT, type RemoteParticipant } from "@/lib/signaling";
 import { useAuth } from "@/providers/auth-provider";
 import type { Meeting, Participant } from "@/lib/types";
 
@@ -391,6 +391,7 @@ export function MeetingRoom({ meetingId }: { meetingId: string }) {
                     labelSuffix={remote ? undefined : "Connecting…"}
                     tone={index % 2 ? "lilac" : "coral"}
                     className="min-h-[140px] w-full"
+                    mediaState={remoteMediaState(remote)}
                   />
                 );
               })}

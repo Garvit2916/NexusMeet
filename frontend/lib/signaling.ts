@@ -43,7 +43,48 @@ export type SignalingStatus =
 export type RemoteParticipant = SignalingPeer & {
   stream: MediaStream | null;
   connectionState: RTCPeerConnectionState;
+  /**
+   * `iceConnectionState` is what separates "still trying" from "gave up", and
+   * the two need different messages. `connectionState` alone reports "new" and
+   * "connecting" for the entire life of a connection that will never work.
+   */
+  iceConnectionState?: RTCIceConnectionState;
+  /**
+   * A `MediaStream` is a truthy object even when empty, so the UI must be told
+   * explicitly whether media actually arrived. Optional because a stream can
+   * also be synthesised before any peer connection exists.
+   */
+  hasVideoTrack?: boolean;
+  hasAudioTrack?: boolean;
 };
+
+/**
+ * What the tile should claim about a remote participant.
+ *
+ * The old logic asked only "does a stream object exist?", which is always true
+ * for a peer that has been created but has not delivered media, so a peer that
+ * could never connect rendered as a black rectangle. These four states are the
+ * honest options, and they are derived from real ICE and track state.
+ */
+export type RemoteMediaState = "live" | "connecting" | "camera-off" | "failed";
+
+export function remoteMediaState(participant: RemoteParticipant | undefined): RemoteMediaState {
+  if (!participant) return "connecting";
+  if (participant.hasVideoTrack) return "live";
+  // The peer explicitly turned the camera off; that is not a connection fault.
+  if (!participant.videoEnabled) return "camera-off";
+  const iceState = participant.iceConnectionState;
+  const connectionState = participant.connectionState;
+  if (
+    iceState === "failed" ||
+    iceState === "closed" ||
+    connectionState === "failed" ||
+    connectionState === "closed"
+  ) {
+    return "failed";
+  }
+  return "connecting";
+}
 
 export type MediaStateUpdate = {
   audioEnabled: boolean;

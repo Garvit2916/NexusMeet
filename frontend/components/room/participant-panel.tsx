@@ -2,7 +2,7 @@
 
 import { Mic, MicOff, UserMinus, X } from "lucide-react";
 import { VideoTile } from "@/components/room/video-tile";
-import type { RemoteParticipant } from "@/lib/signaling";
+import { remoteMediaState, type RemoteParticipant } from "@/lib/signaling";
 import type { Participant } from "@/lib/types";
 
 export function ParticipantPanel({
@@ -65,11 +65,14 @@ export function ParticipantPanel({
                 labelSuffix={participant.mutedByHost ? "Muted by host" : undefined}
                 tone={index % 3 === 0 ? "mint" : index % 3 === 1 ? "coral" : "lilac"}
                 className="aspect-video w-full"
+                mediaState={isSelf ? undefined : remoteMediaState(remote)}
               />
               <div className="flex items-center gap-2 px-1">
                 <p className="min-w-0 flex-1 truncate text-xs text-muted">
                   {isHost ? "Host" : "Guest"}
-                  {remote && remote.stream ? " · live" : remote ? " · connecting" : ""}
+                  {/* Report the real ICE/track state. A peer that exists but has
+                      delivered no media is "connecting", never "live". */}
+                  {remote ? ` · ${remoteMediaState(remote)}` : ""}
                 </p>
                 {canManageParticipants && !isHost && !isSelf ? (
                   <div className="flex items-center gap-1">

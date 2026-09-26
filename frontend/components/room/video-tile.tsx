@@ -1,9 +1,10 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Mic, MicOff, VideoOff } from "lucide-react";
+import { Loader2, Mic, MicOff, VideoOff } from "lucide-react";
 import { Avatar } from "@/components/ui/avatar";
 import { cn } from "@/lib/cn";
+import type { RemoteMediaState } from "@/lib/signaling";
 
 /**
  * One participant's live media.
@@ -34,6 +35,7 @@ export function VideoTile({
   labelSuffix,
   tone = "mint",
   className,
+  mediaState,
 }: {
   stream: MediaStream | null;
   name: string;
@@ -46,6 +48,11 @@ export function VideoTile({
   labelSuffix?: string;
   tone?: "mint" | "coral" | "lilac";
   className?: string;
+  /**
+   * Supplied for remote peers, where the connection and track state is known.
+   * Omitted for the local tile, where the stream is authoritative.
+   */
+  mediaState?: RemoteMediaState;
 }) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const [audioBlocked, setAudioBlocked] = useState(false);
@@ -70,7 +77,26 @@ export function VideoTile({
     void safePlay(video).then(() => setAudioBlocked(false));
   }, []);
 
-  const hasVideo = Boolean(stream) && videoEnabled;
+  // `Boolean(stream)` is always true once a peer exists, because the hook
+  // creates an empty MediaStream up front. Only a real video track means the
+  // tile may claim to be showing video.
+  const hasVideoTrack = Boolean(
+    typeof stream?.getVideoTracks === "function" ? stream.getVideoTracks().length : stream,
+  );
+  const resolvedState: RemoteMediaState =
+    mediaState ??
+    (hasVideoTrack && videoEnabled
+      ? "live"
+      : videoEnabled
+        ? "connecting"
+        : "camera-off");
+  const hasVideo = resolvedState === "live";
+
+  const statusCopy: Record<Exclude<RemoteMediaState, "live">, { label: string; icon: typeof VideoOff }> = {
+    connecting: { label: "Connecting", icon: Loader2 },
+    "camera-off": { label: "Camera off", icon: VideoOff },
+    failed: { label: "Connection lost", icon: VideoOff },
+  };
 
   return (
     <div
@@ -94,8 +120,18 @@ export function VideoTile({
         <div className="absolute inset-0 flex flex-col items-center justify-center bg-[#181a1d]">
           <Avatar initials={initials} name={name} size="lg" tone={tone} />
           <p className="mt-2 flex items-center gap-1.5 text-xs font-semibold text-white/60">
-            <VideoOff className="h-3.5 w-3.5" aria-hidden="true" />
-            {stream ? "Camera off" : "No camera"}
+            {(() => {
+              const { icon: StatusIcon, label } = statusCopy[resolvedState as Exclude<RemoteMediaState, "live">];
+              return (
+                <>
+                  <StatusIcon
+                    className={cn("h-3.5 w-3.5", resolvedState === "connecting" && "animate-spin")}
+                    aria-hidden="true"
+                  />
+                  {label}
+                </>
+              );
+            })()}
           </p>
         </div>
       ) : null}

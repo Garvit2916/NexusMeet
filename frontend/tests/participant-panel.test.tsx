@@ -108,13 +108,55 @@ describe("ParticipantPanel", () => {
       screenSharing: false,
       stream,
       connectionState: "connected",
+      hasVideoTrack: false,
     };
     renderPanel({ remoteStreams: new Map([["usr_guest", remote]]) });
     const tile = screen.getByTestId("tile-Alex Guest");
     // The socket state wins over the stale REST poll for camera state.
     expect(tile).toHaveAttribute("data-video", "off");
     expect(tile).toHaveAttribute("data-audio", "on");
+    // The peer reported its camera off, so the panel must say exactly that
+    // rather than claiming a live media connection it does not have.
+    expect(screen.getByText(/· camera-off/)).toBeInTheDocument();
+  });
+
+  it("does not claim live media before a track has arrived", () => {
+    const stream = { id: "remote-stream" } as unknown as MediaStream;
+    const remote: RemoteParticipant = {
+      connectionId: "conn-1",
+      userId: "usr_guest",
+      participantId: 2,
+      name: "Alex Guest",
+      isHost: false,
+      audioEnabled: true,
+      videoEnabled: true,
+      screenSharing: false,
+      stream,
+      connectionState: "connected",
+      hasVideoTrack: true,
+    };
+    renderPanel({ remoteStreams: new Map([["usr_guest", remote]]) });
     expect(screen.getByText(/· live/)).toBeInTheDocument();
+  });
+
+  it("marks a peer whose ICE failed as a lost connection, not as connecting", () => {
+    const remote: RemoteParticipant = {
+      connectionId: "conn-1",
+      userId: "usr_guest",
+      participantId: 2,
+      name: "Alex Guest",
+      isHost: false,
+      audioEnabled: true,
+      videoEnabled: true,
+      screenSharing: false,
+      stream: { id: "remote-stream" } as unknown as MediaStream,
+      connectionState: "failed",
+      iceConnectionState: "failed",
+      hasVideoTrack: false,
+    };
+    renderPanel({ remoteStreams: new Map([["usr_guest", remote]]) });
+    expect(screen.getByText(/· failed/)).toBeInTheDocument();
+    expect(screen.getByText("Connection lost")).toBeInTheDocument();
   });
 
   it("marks a known socket peer that has no stream yet as connecting", () => {
