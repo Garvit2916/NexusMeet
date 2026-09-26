@@ -164,6 +164,11 @@ export function createDiagnostics(source: () => PeerDiagnostic) {
       });
     },
 
+    /** A routine condition worth recording that is not a failure. */
+    notice(remoteId: string, event: string, detail?: Record<string, unknown>) {
+      emit("ice", remoteId, event, detail);
+    },
+
     iceError(remoteId: string, detail: Record<string, unknown>) {
       emit("ice-error", remoteId, "gather-failed", detail);
     },

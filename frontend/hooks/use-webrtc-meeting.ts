@@ -717,7 +717,8 @@ export function useWebRTCMeeting({
               orphanCandidatesRef.current.set(from, buffered);
             }
             diagnosticsRef.current.remoteCandidate(from, candidate);
-            diagnosticsRef.current.candidateError(from, "buffered-for-unknown-peer", {
+            diagnosticsRef.current.notice(from, "buffered-for-unknown-peer", {
+              type: iceCandidateType(candidate),
               buffered: buffered.length,
             });
             return;
