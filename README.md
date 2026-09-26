@@ -293,16 +293,3 @@ The Vercel rewrite covers REST only. The WebSocket connects straight to `PUBLIC_
 - Set `DEFAULT_USER_PASSWORD` in the dashboard. The seeded demo login is public knowledge, so change it before exposing the deployment.
 
 For more than one backend instance, replace SQLite with a shared database and move participant presence/media signaling to a shared realtime service.
-
-## Known limitations
-
-- Remote audio and video use a full mesh, so every participant holds one peer connection per other participant and upstream bandwidth grows with the square of the room size. Small rooms are fine; a many-party meeting needs an SFU instead of peer-to-peer.
-- Only STUN is configured by default. Peers behind symmetric NAT or restrictive corporate firewalls need `TURN_URL`, `TURN_USERNAME`, and `TURN_CREDENTIAL`, otherwise the connection can fail while everything looks healthy in the UI.
-- The signaling hub is in process memory and the free Render plan sleeps after inactivity. A cold instance drops every open socket, so peers reconnect through the client's backoff; a sleeping instance can also refuse the first ticket request for up to a minute.
-- The signaling socket is same-origin-checked rather than cookie-authenticated, because browsers do not send session cookies on a cross-site WebSocket. The signed ticket is the credential, so `WS_TICKET_SECRET` must be treated as a secret and rotated carefully.
-- Screen sharing is modeled in the participant state but has no room control yet.
-- The pre-join **Check devices** button waits on `navigator.mediaDevices.getUserMedia()`. Browsers grant camera and microphone automatically on `localhost`, but a deployed origin raises a permission prompt first. If that prompt is dismissed or blocked, the request waits rather than failing, so allow camera and microphone for the site from the icon in the address bar. Joining without devices is still possible: **Join meeting** does not depend on the device check. On HTTPS, media capture is unavailable to insecure origins by browser policy, so plain-HTTP LAN testing of the deployed origin will not work.
-- There is no rate limiting, password reset, email verification, or multi-factor authentication; add them before public launch.
-- SQLite is appropriate for local development and a single API instance, not high-concurrency production workloads. The free Render plan adds ephemeral storage and cold starts on top of that.
-- Scheduled-time transitions are evaluated when a join request arrives; a background worker can be added for automatic status changes and notifications.
-- Session cleanup runs on login/registration rather than on a scheduler, so stale rows may linger until the next sign-in.
