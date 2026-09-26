@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  describeIceServers,
   formatDiagnosticLine,
   iceCandidateType,
   type PeerDiagnostic,
@@ -47,6 +48,47 @@ describe("formatDiagnosticLine", () => {
     });
     expect(line).toContain("type=srflx");
     expect(line).not.toContain("undefined");
+  });
+});
+
+describe("describeIceServers", () => {
+  it("reports TURN and STUN presence without revealing the credential", () => {
+    const report = describeIceServers([
+      { urls: ["turn:turn.example.test:3478"], username: "ephemeral-user", credential: "ephemeral-secret" },
+      { urls: ["stun:stun.example.test:19302"] },
+    ]);
+
+    expect(report).toBe("TURN(1),STUN(1)");
+    expect(report).not.toContain("ephemeral-user");
+    expect(report).not.toContain("ephemeral-secret");
+    // Not even the provider hostname, which is unnecessary for the diagnosis.
+    expect(report).not.toContain("turn.example.test");
+  });
+
+  it("distinguishes a TURN-only config from no configuration at all", () => {
+    expect(describeIceServers([{ urls: ["turn:turn.example.test:3478"] }])).toBe("TURN(1)");
+    expect(describeIceServers([])).toBe("none");
+    expect(describeIceServers(undefined)).toBe("none");
+  });
+});
+
+describe("the candidate-types diagnostic", () => {
+  it("reports only the gathered types and whether a relay is in use", () => {
+    const line = formatDiagnosticLine(PEER, "pair", "p", "candidate-types", {
+      types: "host+srflx",
+      hasRelay: false,
+    });
+    expect(line).toContain("types=host+srflx");
+    expect(line).toContain("hasRelay=false");
+  });
+
+  it("makes a relay-backed call identifiable from the log alone", () => {
+    const line = formatDiagnosticLine(PEER, "pair", "p", "candidate-types", {
+      types: "host+srflx+relay",
+      hasRelay: true,
+    });
+    expect(line).toContain("types=host+srflx+relay");
+    expect(line).toContain("hasRelay=true");
   });
 });
 

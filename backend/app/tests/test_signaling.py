@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Any
 
 import pytest
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
 
@@ -224,6 +227,104 @@ def test_expired_ticket_is_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_blank_ws_secret_falls_back_to_development_default() -> None:
     assert Settings(ws_ticket_secret="  ").uses_development_ws_secret
+
+
+def test_ws_ticket_endpoint_returns_the_configured_turn_server(
+    app: FastAPI, client: TestClient
+) -> None:
+    """The browser learns its TURN credential from this endpoint and nowhere else.
+
+    The helper is unit-tested above, but what actually reaches the browser is the
+    HTTP response. Every cross-network failure traced back to this response
+    handing out STUN only, so assert the full round trip.
+    """
+    app.state.settings = app.state.settings.model_copy(
+        update={
+            "turn_url": "turn:turn.example.com:3478",
+            "turn_username": "ephemeral-user",
+            "turn_credential": "ephemeral-secret",
+        }
+    )
+    meeting_id = create_live_meeting(client)
+
+    response = client.post(f"/api/v1/meetings/{meeting_id}/ws-ticket")
+    assert response.status_code == 200, response.text
+    servers = response.json()["data"]["ice_servers"]
+
+    # TURN is offered first so the browser spends its candidate budget on the
+    # path that actually works behind symmetric NAT.
+    assert servers[0] == {
+        "urls": ["turn:turn.example.com:3478"],
+        "username": "ephemeral-user",
+        "credential": "ephemeral-secret",
+    }
+    # The existing STUN configuration must survive alongside it.
+    assert any(str(url).startswith("stun:") for server in servers for url in server["urls"])
+
+
+def test_ws_ticket_endpoint_never_exposes_turn_outside_ice_servers(
+    app: FastAPI, client: TestClient
+) -> None:
+    """A permanent TURN secret must not reach any other part of the response."""
+    app.state.settings = app.state.settings.model_copy(
+        update={
+            "turn_url": "turn:turn.example.com:3478",
+            "turn_username": "ephemeral-user",
+            "turn_credential": "ephemeral-secret",
+        }
+    )
+    meeting_id = create_live_meeting(client)
+
+    body = client.post(f"/api/v1/meetings/{meeting_id}/ws-ticket").json()
+    rendered = json.dumps(body)
+
+    # The secret is present exactly once: inside ice_servers.
+    assert rendered.count("ephemeral-secret") == 1
+    assert body["data"]["ice_servers"][0]["credential"] == "ephemeral-secret"
+    for field in ("turn", "turn_credential", "turn_username", "config", "settings", "env"):
+        assert field not in body["data"]
+
+
+def test_ws_ticket_endpoint_is_stun_only_until_turn_is_fully_configured(
+    app: FastAPI, client: TestClient
+) -> None:
+    """A partial TURN config must fall back to STUN rather than emit a broken server.
+
+    Emitting a TURN entry with a missing credential yields a gather failure that
+    never recovers, so an incomplete config has to look exactly like no TURN.
+    """
+    # `model_copy(update=...)` merges, so each case must start from a pristine
+    # baseline or an earlier case's `turn_url` would satisfy a later one.
+    baseline = app.state.settings
+    for partial in (
+        {"turn_url": "turn:turn.example.com:3478"},
+        {"turn_url": "turn:turn.example.com:3478", "turn_username": "ephemeral-user"},
+        {"turn_username": "ephemeral-user", "turn_credential": "ephemeral-secret"},
+    ):
+        app.state.settings = baseline.model_copy(update=partial)
+        meeting_id = create_live_meeting(client)
+
+        response = client.post(f"/api/v1/meetings/{meeting_id}/ws-ticket")
+        servers = response.json()["data"]["ice_servers"]
+        assert all("credential" not in server for server in servers), partial
+        assert all("username" not in server for server in servers), partial
+
+
+def test_no_real_turn_credential_is_committed_to_the_repository() -> None:
+    """Guard the env templates so a provider credential is never pasted into Git."""
+    root = Path(__file__).resolve().parents[3]
+    for relative in ("backend/.env.example", "render.yaml"):
+        path = root / relative
+        if not path.exists():
+            continue
+        for line in path.read_text(encoding="utf-8").splitlines():
+            stripped = line.strip()
+            keys = ("TURN_URL", "TURN_URLS", "TURN_USERNAME", "TURN_CREDENTIAL", "TURN_PASSWORD")
+            for key in keys:
+                if stripped.startswith(f"{key}="):
+                    value = stripped.split("=", 1)[1].strip().strip("\"'")
+                    # Only documentation placeholders may be committed here.
+                    assert value == "", f"{relative} commits a value for {key}"
 
 
 def test_turn_credentials_are_only_exposed_when_configured() -> None:

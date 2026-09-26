@@ -42,7 +42,12 @@ function clip(value: string, max = 48): string {
   return value.length > max ? `${value.slice(0, max)}…` : value;
 }
 
-function describeIceServers(servers: RTCIceServer[] | undefined): string {
+/**
+ * Reduce the ICE configuration to a presence report. Only the scheme and the
+ * count survive: the TURN URL, username and credential must never reach a log,
+ * so a reader can confirm TURN was offered without learning the secret.
+ */
+export function describeIceServers(servers: RTCIceServer[] | undefined): string {
   if (!servers?.length) return "none";
   return servers
     .map((server) => {

@@ -64,6 +64,25 @@ describe("resolveIceServers", () => {
     expect(servers[0].username).toBe("u");
   });
 
+  it("hands RTCPeerConnection the TURN entry exactly as the API returned it", () => {
+    // The backend serialises `urls` as a list alongside username/credential. That
+    // is the shape WebRTC requires, so it must reach the constructor unmodified.
+    const fromApi = [
+      { urls: ["turn:turn.example.test:3478"], username: "ephemeral-user", credential: "ephemeral-secret" },
+      { urls: ["stun:stun.example.test:19302"] },
+    ];
+
+    const servers = resolveIceServers(fromApi, ["stun:stun.l.google.com:19302"]);
+
+    expect(servers[0]).toEqual({
+      urls: ["turn:turn.example.test:3478"],
+      username: "ephemeral-user",
+      credential: "ephemeral-secret",
+    });
+    // STUN must still be present so a working direct path stays available.
+    expect(servers.some((server) => String(server.urls).includes("stun:"))).toBe(true);
+  });
+
   it("falls back to build-time STUN when the ticket has none", () => {
     const servers = resolveIceServers([], ["stun:stun.example.test:19302"]);
     expect(servers).toEqual([{ urls: "stun:stun.example.test:19302" }]);
