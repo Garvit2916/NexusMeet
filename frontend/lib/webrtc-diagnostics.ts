@@ -79,6 +79,15 @@ export function iceCandidateType(candidate: RTCIceCandidate | RTCIceCandidateIni
  * Resolved at emit time rather than at construction, because the connection id
  * and host role only become known once the server sends `welcome`.
  */
+/**
+ * `RTCPeerConnectionIceErrorEvent.errorCode` values that appear in normal
+ * operation. Reporting these as errors would bury the ones that matter.
+ */
+const ICE_GATHER_NOTICES: Record<number, string> = {
+  701: "candidate type blocked by local network policy",
+  702: "ice gathering failed",
+};
+
 export function createDiagnostics(source: () => PeerDiagnostic) {
   function emit(channel: string, remoteId: string, event: string, detail?: Record<string, unknown>) {
     if (QUIET || typeof console === "undefined") return;
@@ -142,6 +151,20 @@ export function createDiagnostics(source: () => PeerDiagnostic) {
 
     iceError(remoteId: string, detail: Record<string, unknown>) {
       emit("ice-error", remoteId, "gather-failed", detail);
+    },
+
+    /**
+     * A candidate type the local network policy refused. This is routine, for
+     * example when a browser blocks server-reflexive candidates on loopback, so
+     * it is reported as a notice rather than an error.
+     */
+    iceGatherNotice(remoteId: string, code: number) {
+      const notice = ICE_GATHER_NOTICES[code];
+      if (notice) {
+        emit("ice", remoteId, "gather-notice", { errorCode: code, notice });
+        return;
+      }
+      emit("ice-error", remoteId, "gather-error", { errorCode: code });
     },
 
     /** A candidate we could not use, or could not deliver to a peer. */

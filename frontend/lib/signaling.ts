@@ -70,9 +70,11 @@ export type RemoteMediaState = "live" | "connecting" | "camera-off" | "failed";
 
 export function remoteMediaState(participant: RemoteParticipant | undefined): RemoteMediaState {
   if (!participant) return "connecting";
-  if (participant.hasVideoTrack) return "live";
-  // The peer explicitly turned the camera off; that is not a connection fault.
+  // A peer reporting its camera off is authoritative even when a track is still
+  // attached: turning a camera off disables the track, it does not stop it, so
+  // checking for a track first would keep claiming live video.
   if (!participant.videoEnabled) return "camera-off";
+  if (participant.hasVideoTrack) return "live";
   const iceState = participant.iceConnectionState;
   const connectionState = participant.connectionState;
   if (

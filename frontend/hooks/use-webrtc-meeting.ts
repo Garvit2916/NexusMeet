@@ -520,9 +520,10 @@ export function useWebRTCMeeting({
       };
 
       connection.onicecandidateerror = (event) => {
-        diagnosticsRef.current.candidateError(connectionId, "gather-error", {
-          errorCode: (event as RTCPeerConnectionIceErrorEvent).errorCode,
-        });
+        diagnosticsRef.current.iceGatherNotice(
+          connectionId,
+          (event as RTCPeerConnectionIceErrorEvent).errorCode,
+        );
       };
 
       connection.oniceconnectionstatechange = () => {
