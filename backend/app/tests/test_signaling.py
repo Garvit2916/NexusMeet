@@ -311,20 +311,37 @@ def test_ws_ticket_endpoint_is_stun_only_until_turn_is_fully_configured(
 
 
 def test_no_real_turn_credential_is_committed_to_the_repository() -> None:
-    """Guard the env templates so a provider credential is never pasted into Git."""
+    """Guard the env templates and docs so a provider credential never lands in Git.
+
+    The relay credential is a permanent shared secret for most providers, and a
+    stray paste into `.env.example`, `render.yaml`, or the README would publish it
+    to everyone who clones the repository.
+    """
     root = Path(__file__).resolve().parents[3]
-    for relative in ("backend/.env.example", "render.yaml"):
+    keys = ("TURN_URL", "TURN_URLS", "TURN_USERNAME", "TURN_CREDENTIAL", "TURN_PASSWORD")
+
+    def assignments(relative: str) -> Iterator[tuple[str, str, str]]:
         path = root / relative
         if not path.exists():
-            continue
+            return
         for line in path.read_text(encoding="utf-8").splitlines():
             stripped = line.strip()
-            keys = ("TURN_URL", "TURN_URLS", "TURN_USERNAME", "TURN_CREDENTIAL", "TURN_PASSWORD")
             for key in keys:
                 if stripped.startswith(f"{key}="):
-                    value = stripped.split("=", 1)[1].strip().strip("\"'")
-                    # Only documentation placeholders may be committed here.
-                    assert value == "", f"{relative} commits a value for {key}"
+                    yield relative, key, stripped.split("=", 1)[1].strip().strip("\"'")
+
+    # Deployable templates must stay empty; there is no legitimate reason to
+    # commit a value where Render or a developer will read it.
+    for relative in ("backend/.env.example", "render.yaml"):
+        for path, key, value in assignments(relative):
+            assert value == "", f"{path} commits a value for {key}: {value!r}"
+
+    # Prose may show a TURN_URL, but only against the reserved example domain.
+    for path, key, value in assignments("README.md"):
+        if key in {"TURN_URL", "TURN_URLS"}:
+            assert "example.com" in value, f"{path} shows a real relay host for {key}: {value!r}"
+        else:
+            assert value in {"", "..."}, f"{path} shows a {key} value: {value!r}"
 
 
 def test_turn_credentials_are_only_exposed_when_configured() -> None:

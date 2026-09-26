@@ -28,9 +28,12 @@ Remote audio and video are live on the deployment above. Open the same meeting i
 - Pre-join camera and microphone preview
 - Permission-aware local media with graceful camera/microphone fallbacks
 - Real peer-to-peer audio and video over a full WebRTC mesh, with live remote video tiles
+- TURN relay support so calls connect across restrictive NATs and firewalls, with the credential resolved server-side
 - Short-lived HMAC-signed signaling tickets bound to a single meeting and minted only for active participants
 - WebSocket signaling for SDP, ICE, media state, host mute/remove, and room lifecycle events
-- Deterministic offer initiation, ICE buffering until the remote description arrives, and automatic reconnect with backoff
+- Deterministic offer initiation, glare-safe renegotiation for late tracks, ICE buffering until the remote description arrives, and automatic reconnect with backoff
+- In-place ICE recovery via `restartIce()` so a transient network change no longer drops a participant
+- Secret-safe `[webrtc]` diagnostics reporting candidate types and whether a relay is in use
 - Live signaling status, peer count, and per-peer connection state in the room UI
 - Host mute that disables the guest's real microphone track, not just a UI flag
 - Persisted join, leave, and media-state updates
@@ -94,6 +97,8 @@ python -m uvicorn app.main:app --reload --port 8000
 The API is available at `http://localhost:8000`; interactive OpenAPI documentation is at `http://localhost:8000/docs`.
 
 The application also creates tables and seeds the default user on startup when `AUTO_CREATE_TABLES=true`. Alembic remains the recommended migration path for controlled deployments.
+
+`Copy-Item .env.example .env` leaves `TURN_URL`, `TURN_USERNAME`, and `TURN_CREDENTIAL` empty, which is correct for local work: both browsers share a machine, so host candidates connect without a relay. To reproduce a restrictive network locally, put a relay in `backend/.env` and restart; `.env` is git-ignored and must stay that way.
 
 ### Frontend
 
@@ -176,7 +181,46 @@ Host mute, removal, and end-meeting are ordinary authenticated REST calls listed
 
 Two browsers on the same network or the same NAT connect with STUN alone. Browsers on genuinely different networks often cannot, and no amount of client-side retrying will fix it: STUN only discovers a public address, it cannot relay media. A restrictive or symmetric NAT, or a firewall that blocks arbitrary UDP, leaves the pair with no common candidate, so the connection sits in `checking` and then fails.
 
-`TURN_URL`, `TURN_USERNAME`, and `TURN_CREDENTIAL` are therefore required for real-world connectivity. `TURN_URLS` and `TURN_PASSWORD` are accepted as aliases. All three are needed before TURN is advertised; a partial configuration is ignored rather than handing the browser an unusable relay. The credentials stay on the server and reach the browser only inside the authenticated ticket response, never in the frontend bundle. Prefer `turns:` on port 5349 where the provider supports it.
+#### Configuring TURN
+
+Three variables on the API are required for real-world connectivity. They are read only in `backend/app/core/config.py` and turned into an ICE configuration only in `backend/app/realtime/tickets.py`.
+
+| Variable | Alias | Purpose | Example |
+| --- | --- | --- | --- |
+| `TURN_URL` | `TURN_URLS` | Relay URL, or several separated by commas | `turn:relay.example.com:3478,turns:relay.example.com:443?transport=tcp` |
+| `TURN_USERNAME` | — | Relay username | `a1b2c3d4e5f6` |
+| `TURN_CREDENTIAL` | `TURN_PASSWORD` | Relay password | *(never committed)* |
+
+`STUN_URLS` continues to supply the STUN servers, and both kinds are returned together, TURN first so the browser spends its candidate budget on the path that actually works behind symmetric NAT.
+
+All three TURN values are needed before TURN is advertised. A partial configuration is **ignored** rather than handing the browser an unusable relay, because a TURN entry with a missing credential fails to gather and never recovers, which is harder to diagnose than no TURN at all. With TURN unset, the ticket simply returns STUN only.
+
+Set them in the Render dashboard, never in a committed file. In the API service, the exact keys are `TURN_URL`, `TURN_USERNAME`, and `TURN_CREDENTIAL`; `render.yaml` declares all three as `sync: false` so Render prompts for them instead of reading a value from the repository.
+
+#### Prefer two relay URLs
+
+A single `turns:` URL is enough to reach a restrictive firewall, but `?transport=tcp` limits the browser to TCP relay candidates. UDP relay is cheaper and avoids head-of-line blocking on a lossy mobile link, so list a UDP relay first and keep TLS as the fallback:
+
+```
+TURN_URL=turn:relay.example.com:3478,turns:relay.example.com:443?transport=tcp
+```
+
+TLS on 443 is the more important of the two, since it survives the tightest egress filtering. The browser tries each in order and uses whichever candidate pair connects.
+
+#### What the browser receives
+
+The API resolves the ICE configuration server-side, so a permanent relay credential is never built into the JavaScript bundle. The authenticated ticket response carries it, and `resolveIceServers()` hands it to `RTCPeerConnection` unchanged:
+
+```json
+{
+  "ice_servers": [
+    { "urls": ["turn:relay.example.com:3478"], "username": "a1b2c3d4e5f6", "credential": "..." },
+    { "urls": ["stun:stun.l.google.com:19302"] }
+  ]
+}
+```
+
+This is the minimum WebRTC requires: a browser cannot use TURN without the username and credential, so they must reach the client, which is why they are served from an authenticated, short-lived endpoint rather than embedded in the app. They appear in that response and nowhere else. No other endpoint exposes settings, and `ice_servers` is the only field in the ticket that carries them. Prefer a time-limited relay credential so an accidental disclosure expires on its own.
 
 ### Connection recovery
 
@@ -198,21 +242,35 @@ The media layer writes one structured line per event to the browser console, pre
 
 Tickets, passwords, session cookies, SDP bodies, and candidate addresses are never logged; only message types, candidate types, byte counts, and connection states are.
 
+The ICE configuration is reduced to a presence report. `configured=TURN(1),STUN(1)` means one TURN entry and one STUN entry were offered; the relay hostname, username, and credential are deliberately absent, so a reader can confirm TURN was offered without learning the secret.
+
 ```
-[webrtc] ice-config  role=guest client=cteqd2u meeting=room-1 self=conn-b peer=- configured=STUN(1)
+[webrtc] ice-config  role=guest client=cteqd2u meeting=room-1 self=conn-b peer=- configured=TURN(1),STUN(1)
 [webrtc] peer        ... peer=conn-a event=created placeholder=false
 [webrtc] ice         ... peer=conn-a event=local-candidate type=host protocol=udp
+[webrtc] ice         ... peer=conn-a event=local-candidate type=relay protocol=tcp
 [webrtc] ice         ... peer=conn-a event=remote-candidate type=srflx
 [webrtc] peer        ... peer=conn-a event=connection-state connectionState=connected
-[webrtc] pair        ... peer=conn-a event=candidate-types types=host+srflx hasRelay=false
+[webrtc] pair        ... peer=conn-a event=candidate-types types=host+relay+srflx hasRelay=true
 [webrtc] pair        ... peer=conn-a event=selected state=succeeded bytesReceived=184320
 ```
 
-`hasRelay=false` on a connection that never completes is the signature of missing TURN. `signal-error` and `ice-error` lines name the operation that was rejected, which is otherwise swallowed by the browser's promise.
+`types` lists the candidate kinds actually gathered, which is the single most useful field when a call will not connect. `hasRelay=true` means a TURN relay is in the candidate set, so the network path exists even if a direct route was never found.
+
+| What the console shows | Meaning | Fix |
+| --- | --- | --- |
+| `configured=STUN(1)` and `hasRelay=false` | TURN is not configured or is only partially configured | Set all three TURN variables, then redeploy |
+| `configured=TURN(1),STUN(1)` but no `type=relay` candidate | The browser could not reach the relay | Check the URL scheme and port, and whether the provider requires a TCP or UDP transport |
+| `hasRelay=true` but `selected` never succeeds | Both sides have a relay, yet no pair forms | Usually a credential mismatch or an expired time-limited credential |
+| `types=host+srflx` and state `connecting` for minutes | STUN-only behind restrictive NAT | The signature of missing TURN |
+| `signal-error` / `ice-error` lines | An operation the browser would otherwise swallow | Each line names the rejected operation |
+
+Two browsers on the same machine pass every one of these checks while still being unable to cross a real network, because host candidates are always available locally. A same-machine test cannot prove NAT traversal; see **Verification**.
 
 ### Security properties
 
 - Tickets are HMAC-SHA256 signed with `WS_TICKET_SECRET`, expire after `WS_TICKET_TTL_SECONDS` (120 by default), and are bound to one meeting and one user.
+- The TURN credential lives only in the API's environment. It is returned exclusively in the `ice_servers` field of an authenticated ticket and is never written to the frontend bundle, another endpoint, or a log line.
 - Every inbound message is schema-validated before it reaches the hub.
 - The handshake `Origin` must appear in `CORS_ORIGINS`, so a ticket that leaks out of band cannot be replayed by an unrelated page.
 - In production the API refuses to mint tickets while `WS_TICKET_SECRET` is still the published development value.
@@ -294,6 +352,25 @@ WebRTC cannot be covered by unit tests alone, because the interesting failures l
 
 Two useful signals when a deployed room shows a media error with zero peers: a `404` on `ws-ticket` means the API build predates the signaling route, and a `400` on the CORS preflight means the app origin is missing from `CORS_ORIGINS`. A refused WebSocket handshake returns `403` with an empty body, because the API closes the socket before accepting it.
 
+#### Testing across real networks
+
+Steps 1-6 above run both browsers on one machine, where host candidates are always available. That proves signaling and media but **cannot** prove NAT traversal, so it will pass even with TURN entirely unconfigured. The test that matters puts the two browsers on genuinely different networks:
+
+1. Connect one browser to Wi-Fi, and the second to a phone hotspot, or tether one to a different carrier.
+2. Open the same room link in both and join on each side.
+3. Confirm both consoles show `hasRelay=true` and a `relay` entry in `types`. On a hotspot, `hasRelay=true` is the expected result, not an exception.
+4. Confirm an `event=selected` line with `state=succeeded` on both sides and byte counts that rise on each side as the other speaks.
+5. If it fails, compare the two consoles against the table under **Diagnostics** and send both sides' `[webrtc]` lines.
+
+A quick check that TURN reached the deployment at all, without opening a browser:
+
+```powershell
+$t = Invoke-RestMethod -Uri "$api/meetings/$id/ws-ticket" -Method Post -WebSession $session
+$t.data.ice_servers | Format-Table urls, username, credential
+```
+
+A TURN entry with a populated `username` and `credential` confirms the environment variables reached the running service. Do not paste that output into a bug report; it contains the live relay credential.
+
 ## Deployment
 
 ### Frontend on Vercel, API on Render
@@ -315,7 +392,11 @@ Two useful signals when a deployed room shows a media error with zero peers: a `
    | `WS_TICKET_SECRET` | long random string | Signs signaling tickets; never reuse the development value |
    | `PUBLIC_WS_URL` | `wss://<api-service>.onrender.com` | Absolute socket URL handed to the browser |
    | `STUN_URLS` | comma-separated STUN URLs | ICE servers advertised to clients |
-   | `TURN_URL`, `TURN_USERNAME`, `TURN_CREDENTIAL` | relay credentials | Needed only when peers sit behind restrictive NAT |
+   | `TURN_URL` | `turn:<relay>:3478,turns:<relay>:443?transport=tcp` | Relay the browser can fall back to; see **NAT traversal** |
+   | `TURN_USERNAME` | provider username | Relay authentication |
+   | `TURN_CREDENTIAL` | provider credential | Relay authentication; rotate if ever disclosed |
+
+TURN is not optional for a real deployment, only for a same-network demo. Enter the three TURN values in the Render dashboard and redeploy; they are read at boot, so a change without a restart has no effect. `render.yaml` declares them as `sync: false`, which means Render never reads them from the repository and the blueprint cannot leak them into Git.
 
 The proxy is deliberate. With the frontend on `*.vercel.app` and the API on `*.onrender.com` the origins are cross-site, so a `SameSite=Lax` session cookie would be dropped by the browser and every authenticated request would fail. Forwarding `/api/*` through Next.js keeps the cookie first-party, so authentication works in any browser without weakening cookie rules. Leave `API_ORIGIN` unset locally and the frontend calls `http://localhost:8000/api/v1` directly.
 
