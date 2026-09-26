@@ -88,15 +88,30 @@ const ICE_GATHER_NOTICES: Record<number, string> = {
   702: "ice gathering failed",
 };
 
+/**
+ * Renders one diagnostic line. Exported so the format can be asserted directly:
+ * an event label that silently goes missing makes every log ambiguous, which is
+ * worse than having no log at all.
+ */
+export function formatDiagnosticLine(
+  peer: PeerDiagnostic,
+  channel: string,
+  remoteId: string,
+  event: string,
+  detail: Record<string, unknown> = {},
+): string {
+  const context = `role=${peer.role} client=${clip(peer.clientId, 8)} meeting=${clip(peer.meetingId, 16)}`;
+  const parts = Object.entries(detail)
+    .filter(([, value]) => value !== undefined)
+    .map(([key, value]) => `${key}=${String(value)}`);
+  const head = `${PREFIX} ${channel} ${context} event=${event} self=${clip(peer.selfConnectionId ?? "-", 10)} peer=${clip(remoteId || "-", 10)}`;
+  return parts.length ? `${head} ${parts.join(" ")}` : head;
+}
+
 export function createDiagnostics(source: () => PeerDiagnostic) {
   function emit(channel: string, remoteId: string, event: string, detail?: Record<string, unknown>) {
     if (QUIET || typeof console === "undefined") return;
-    const peer = source();
-    const context = `role=${peer.role} client=${clip(peer.clientId, 8)} meeting=${clip(peer.meetingId, 16)}`;
-    const parts = Object.entries(detail ?? {})
-      .filter(([, value]) => value !== undefined)
-      .map(([key, value]) => `${key}=${String(value)}`);
-    const line = `${PREFIX} ${channel} ${context} self=${clip(peer.selfConnectionId ?? "-", 10)} peer=${clip(remoteId || "-", 10)}${parts.length ? ` ${parts.join(" ")}` : ""}`;
+    const line = formatDiagnosticLine(source(), channel, remoteId, event, detail);
     if (channel === "signal-error" || channel === "ice-error" || channel === "peer-failed") {
       console.error(line);
       return;
