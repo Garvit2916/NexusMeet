@@ -10,6 +10,7 @@ type AuthContextValue = {
   isLoading: boolean;
   isAuthenticated: boolean;
   error: string | null;
+  clearError: () => void;
   signIn: (credentials: Credentials) => Promise<User>;
   signUp: (registration: Registration) => Promise<User>;
   signOut: () => Promise<void>;
@@ -39,6 +40,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     void refreshUser();
   }, [refreshUser]);
+
+  // Without this, a failed sign-in message stays on screen after the user
+  // navigates to the registration page, because the provider outlives the form.
+  const clearError = useCallback(() => setError(null), []);
 
   const signIn = useCallback(async (credentials: Credentials) => {
     setError(null);
@@ -76,8 +81,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const value = useMemo<AuthContextValue>(
-    () => ({ user, isLoading, isAuthenticated: Boolean(user), error, signIn, signUp, signOut, refreshUser }),
-    [user, isLoading, error, signIn, signUp, signOut, refreshUser],
+    () => ({ user, isLoading, isAuthenticated: Boolean(user), error, clearError, signIn, signUp, signOut, refreshUser }),
+    [user, isLoading, error, clearError, signIn, signUp, signOut, refreshUser],
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

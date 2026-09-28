@@ -2,20 +2,48 @@
 
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
-import { type FormEvent, useState } from "react";
-import { AuthCard, Field } from "@/components/auth/sign-in-form";
-import { resolveNextPath } from "@/components/auth/require-auth";
+import { useEffect, useState, type FormEvent } from "react";
+import { AlertCircle, ArrowRight } from "lucide-react";
+import { AuthLayout } from "@/components/auth/auth-layout";
+import { Checkbox, PasswordField, RequirementList, TextField } from "@/components/auth/auth-fields";
 import { Button } from "@/components/ui/button";
+import { resolveNextPath } from "@/components/auth/require-auth";
 import { useAuth } from "@/providers/auth-provider";
-import { ApiError } from "@/services/api";
+import { bannerMessageFrom, fieldErrorsFrom, type FieldErrors } from "@/lib/auth-errors";
+import {
+  MAX_PASSWORD_LENGTH,
+  STRENGTH_LABELS,
+  passwordRequirements,
+  passwordStrength,
+  validateEmail,
+  validateName,
+  validatePassword,
+} from "@/lib/auth-validation";
+import { cn } from "@/lib/cn";
+
+const STRENGTH_COLORS = [
+  "bg-line",
+  "bg-coral",
+  "bg-sun",
+  "bg-mint",
+  "bg-mint-dark",
+];
 
 export function SignUpForm() {
   const router = useRouter();
   const searchParams = useSearchParams();
-  const { signUp, error, isLoading } = useAuth();
-  const [form, setForm] = useState({ name: "", email: "", password: "" });
+  const { signUp, isLoading, isAuthenticated } = useAuth();
+  const [form, setForm] = useState({ name: "", email: "", password: "", confirmPassword: "" });
+  const [acceptedTerms, setAcceptedTerms] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
-  const [formError, setFormError] = useState<string | null>(null);
+  const [bannerError, setBannerError] = useState<string | null>(null);
+  const [fieldErrors, setFieldErrors] = useState<FieldErrors>({});
+
+  useEffect(() => {
+    if (!isLoading && isAuthenticated) {
+      router.replace(resolveNextPath(searchParams));
+    }
+  }, [isLoading, isAuthenticated, router, searchParams]);
 
   function updateField(field: keyof typeof form, value: string) {
     setForm((current) => ({ ...current, [field]: value }));
@@ -23,13 +51,41 @@ export function SignUpForm() {
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    setFormError(null);
+    if (isSubmitting) return;
+
+    const emailError = validateEmail(form.email);
+    const nameError = validateName(form.name);
+    const passwordError = validatePassword(form.password);
+    const confirmError = form.confirmPassword
+      ? form.password === form.confirmPassword
+        ? null
+        : "Passwords do not match."
+      : "Confirm your password.";
+
+    const nextErrors: FieldErrors = {
+      ...(nameError ? { name: nameError } : {}),
+      ...(emailError ? { email: emailError } : {}),
+      ...(passwordError ? { password: passwordError } : {}),
+      ...(confirmError ? { confirmPassword: confirmError } : {}),
+      ...(acceptedTerms ? {} : { terms: "Please accept the terms to continue." }),
+    };
+    if (Object.keys(nextErrors).length) {
+      setFieldErrors(nextErrors);
+      setBannerError("Check the highlighted fields and try again.");
+      return;
+    }
+
+    setBannerError(null);
+    setFieldErrors({});
     setIsSubmitting(true);
     try {
-      await signUp(form);
+      await signUp({ name: form.name.trim(), email: form.email.trim(), password: form.password });
       router.replace(resolveNextPath(searchParams));
     } catch (requestError) {
-      setFormError(requestError instanceof ApiError ? requestError.message : "We could not create your account. Please try again.");
+      setFieldErrors(fieldErrorsFrom(requestError));
+      setBannerError(
+        bannerMessageFrom(requestError, "We could not create your account. Please try again."),
+      );
     } finally {
       setIsSubmitting(false);
     }
@@ -37,74 +93,134 @@ export function SignUpForm() {
 
   const next = searchParams.get("next");
   const disabled = isSubmitting || isLoading;
+  const strength = passwordStrength(form.password);
+  const requirements = passwordRequirements(form.password);
 
   return (
-    <AuthCard
+    <AuthLayout
       title="Create your account"
-      subtitle="Register once, then host or join meetings from any device."
+      subtitle="Free to join. You only need a name, a work email, and a password."
       footer={
         <>
-          Already have an account?{" "}
+          Already registered?{" "}
           <Link
             href={`/login${next ? `?next=${encodeURIComponent(next)}` : ""}`}
-            className="font-bold text-mint-dark hover:underline"
+            className="font-semibold text-mint-dark underline-offset-4 hover:underline"
           >
             Sign in
           </Link>
         </>
       }
     >
-      <form className="space-y-4" onSubmit={handleSubmit} noValidate>
-        <Field label="Full name" id="signup-name">
-          <input
-            id="signup-name"
-            name="name"
-            type="text"
-            autoComplete="name"
-            required
-            minLength={2}
-            value={form.name}
-            onChange={(event) => updateField("name", event.target.value)}
-            className="w-full rounded-xl border border-line bg-white px-3.5 py-2.5 text-sm text-ink outline-none transition focus:border-mint focus:ring-2 focus:ring-mint/20"
-            placeholder="Ada Lovelace"
-          />
-        </Field>
-        <Field label="Work email" id="signup-email">
-          <input
-            id="signup-email"
-            name="email"
-            type="email"
-            autoComplete="email"
-            required
-            value={form.email}
-            onChange={(event) => updateField("email", event.target.value)}
-            className="w-full rounded-xl border border-line bg-white px-3.5 py-2.5 text-sm text-ink outline-none transition focus:border-mint focus:ring-2 focus:ring-mint/20"
-            placeholder="you@company.com"
-          />
-        </Field>
-        <Field label="Password" id="signup-password">
-          <input
-            id="signup-password"
-            name="password"
-            type="password"
-            autoComplete="new-password"
-            required
-            minLength={8}
-            value={form.password}
-            onChange={(event) => updateField("password", event.target.value)}
-            className="w-full rounded-xl border border-line bg-white px-3.5 py-2.5 text-sm text-ink outline-none transition focus:border-mint focus:ring-2 focus:ring-mint/20"
-            placeholder="At least 8 characters"
-          />
-        </Field>
-        {formError || error ? (
-          <p role="alert" className="rounded-xl bg-[#fff0f0] px-3.5 py-2.5 text-xs font-semibold text-[#b4272d]">
-            {formError ?? error}
-          </p>
+      <form onSubmit={handleSubmit} noValidate className="space-y-5">
+        {bannerError ? (
+          <div
+            role="alert"
+            className="flex items-start gap-2.5 rounded-xl border border-coral/25 bg-[#FFF1F1] px-3.5 py-3"
+          >
+            <AlertCircle className="mt-px h-4 w-4 shrink-0 text-coral" aria-hidden="true" />
+            <p className="text-[13px] font-medium leading-5 text-[#B4272D]">{bannerError}</p>
+          </div>
         ) : null}
-        <Button type="submit" className="w-full justify-center" disabled={disabled}>
-          {isSubmitting ? "Creating account…" : "Create account"}
+
+        <TextField
+          label="Full name"
+          name="name"
+          type="text"
+          autoComplete="name"
+          placeholder="Ada Lovelace"
+          value={form.name}
+          onChange={(event) => updateField("name", event.target.value)}
+          error={fieldErrors.name}
+          required
+        />
+
+        <TextField
+          label="Work email"
+          name="email"
+          type="email"
+          inputMode="email"
+          autoComplete="email"
+          autoCapitalize="none"
+          spellCheck={false}
+          placeholder="you@company.com"
+          value={form.email}
+          onChange={(event) => updateField("email", event.target.value)}
+          error={fieldErrors.email}
+          required
+        />
+
+        <div className="space-y-2">
+          <PasswordField
+            label="Password"
+            name="password"
+            autoComplete="new-password"
+            placeholder={`At least ${8} characters`}
+            value={form.password}
+            maxLength={MAX_PASSWORD_LENGTH}
+            onChange={(event) => updateField("password", event.target.value)}
+            error={fieldErrors.password}
+            required
+          />
+
+          {form.password ? (
+            <div className="space-y-2" aria-live="polite">
+              <div className="flex items-center gap-2">
+                <div className="flex flex-1 gap-1" role="img" aria-label={`Password strength: ${STRENGTH_LABELS[strength]}`}>
+                  {[0, 1, 2, 3].map((index) => (
+                    <span
+                      key={index}
+                      className={cn(
+                        "h-1 flex-1 rounded-full transition-colors",
+                        index < strength ? STRENGTH_COLORS[strength] : "bg-line",
+                      )}
+                    />
+                  ))}
+                </div>
+                <span className="w-16 text-right text-[11px] font-semibold text-muted">
+                  {STRENGTH_LABELS[strength]}
+                </span>
+              </div>
+              <RequirementList items={requirements} />
+            </div>
+          ) : null}
+        </div>
+
+        <PasswordField
+          label="Confirm password"
+          name="confirmPassword"
+          autoComplete="new-password"
+          placeholder="Re-enter your password"
+          value={form.confirmPassword}
+          onChange={(event) => updateField("confirmPassword", event.target.value)}
+          error={fieldErrors.confirmPassword}
+          required
+        />
+
+        <Checkbox
+          id="accept-terms"
+          checked={acceptedTerms}
+          onChange={(checked) => {
+            setAcceptedTerms(checked);
+            if (checked) {
+            setFieldErrors((current) => {
+              const rest = { ...current };
+              delete rest.terms;
+              return rest;
+            });
+            }
+          }}
+          error={fieldErrors.terms}
+        >
+          I agree to the terms of service and privacy policy, and I understand that meetings are not
+          recorded by default.
+        </Checkbox>
+
+        <Button type="submit" size="lg" className="w-full justify-center" disabled={disabled}>
+          {isSubmitting ? "Creating your account…" : "Create account"}
+          {!isSubmitting ? <ArrowRight className="h-4 w-4" aria-hidden="true" /> : null}
         </Button>
       </form>
-    </AuthCard>
+    </AuthLayout>
   );
 }

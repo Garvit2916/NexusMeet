@@ -1,6 +1,8 @@
 import asyncio
+import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from datetime import timedelta
 from uuid import uuid4
 
 from fastapi import FastAPI, Request, Response
@@ -15,8 +17,26 @@ from app.db.init_db import initialize_database
 from app.db.seed import seed_database
 from app.db.session import Database
 from app.realtime.router import router as signaling_router
+from app.services.auth_service import AuthService
 
 __all__ = ["app", "create_app"]
+
+logger = logging.getLogger(__name__)
+
+
+def _purge_expired_sessions(application: FastAPI) -> None:
+    """Drop session rows that can no longer authenticate anyone.
+
+    Without this the ``sessions`` table only ever grows, because expiry is
+    checked on read and never enforced by deletion.
+    """
+    settings: Settings = application.state.settings
+    with application.state.session_factory() as session:
+        removed = AuthService(
+            session, session_ttl=timedelta(seconds=settings.session_ttl_seconds)
+        ).purge_expired_sessions()
+    if removed:
+        logger.info("Purged %s expired session(s) on startup", removed)
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -32,6 +52,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             if application.state.settings.auto_create_tables:
                 initialize_database(application.state.database.engine)
             seed_database(application.state.database, application.state.settings)
+            _purge_expired_sessions(application)
             yield
         finally:
             application.state.database.dispose()

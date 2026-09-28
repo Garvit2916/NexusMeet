@@ -12,6 +12,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.core.config import Settings
+from app.core.rate_limit import login_rate_limiter
 from app.main import create_app
 from app.models.session import AuthSession
 
@@ -30,10 +31,20 @@ def login(client: TestClient, email: str, password: str) -> None:
     assert client.cookies.get("nexusmeet_session")
 
 
+@pytest.fixture(autouse=True)
+def reset_rate_limiter() -> Iterator[None]:
+    """The login limiter is process-wide, so clear it between tests to stop one
+    test's lockout from failing an unrelated one."""
+    login_rate_limiter.clear()
+    yield
+    login_rate_limiter.clear()
+
+
 @pytest.fixture
 def app(tmp_path: Path) -> Iterator[FastAPI]:
     database_path = (tmp_path / "nexusmeet-test.db").as_posix()
     settings = Settings(
+        _env_file=None,
         app_name="NexusMeet Test API",
         database_url=f"sqlite:///{database_path}",
         auto_create_tables=True,

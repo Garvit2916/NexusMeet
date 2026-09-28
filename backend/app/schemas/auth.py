@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from pydantic import EmailStr, Field, field_validator
+from pydantic import EmailStr, Field, ValidationInfo, field_validator
 
 from app.schemas.common import APIModel
 
@@ -41,7 +41,20 @@ class LoginRequest(APIModel):
         return normalize_email(value)
 
 
+class ChangePasswordRequest(APIModel):
+    current_password: str = Field(min_length=1, max_length=MAX_PASSWORD_LENGTH)
+    new_password: str = Field(min_length=MIN_PASSWORD_LENGTH, max_length=MAX_PASSWORD_LENGTH)
+
+    @field_validator("new_password")
+    @classmethod
+    def reject_reuse(cls, value: str, info: ValidationInfo) -> str:
+        if "current_password" in info.data and value == info.data["current_password"]:
+            raise ValueError("new password must be different from the current password")
+        return value
+
+
 __all__ = [
+    "ChangePasswordRequest",
     "LoginRequest",
     "MAX_PASSWORD_LENGTH",
     "MIN_PASSWORD_LENGTH",

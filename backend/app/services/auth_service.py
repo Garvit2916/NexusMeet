@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import secrets
 from datetime import timedelta
 from secrets import token_hex
 from typing import NamedTuple
@@ -12,6 +13,7 @@ from app.core.security import (
     generate_session_token,
     hash_password,
     hash_session_token,
+    needs_rehash,
     verify_password,
 )
 from app.models.session import AuthSession
@@ -26,6 +28,11 @@ from app.utils.time import utc_now
 class IssuedSession(NamedTuple):
     auth_session: AuthSession
     token: str
+
+
+# A real Argon2id hash of a value nobody knows, used to equalise the cost of a
+# login attempt for an unknown address against one for a known address.
+DUMMY_PASSWORD_HASH = hash_password(secrets.token_urlsafe(32))
 
 
 class AuthService:
@@ -65,14 +72,40 @@ class AuthService:
     def authenticate(self, email: str, password: str) -> User:
         normalized_email = normalize_email(email)
         user = self.users.get_by_email(normalized_email)
-        if user is None or not verify_password(user.password_hash, password):
-            # One generic message so the API never reveals which emails exist.
+        if user is None:
+            # Run a throwaway verification so an unknown email costs the same
+            # wall-clock time as a wrong password. Otherwise response latency
+            # alone reveals which addresses are registered.
+            verify_password(DUMMY_PASSWORD_HASH, password)
+            self._raise_invalid_credentials()
+        assert user is not None  # narrows the NoReturn helper for the type checker
+        if not verify_password(user.password_hash, password):
+            self._raise_invalid_credentials()
+        if user.password_hash and needs_rehash(user.password_hash):
+            # Transparent upgrade: the caller proved they know the password, so
+            # re-hash under the current Argon2 parameters.
+            user.password_hash = hash_password(password)
+            self._commit()
+        return user
+
+    def change_password(self, user: User, current_password: str, new_password: str) -> None:
+        if not verify_password(user.password_hash, current_password):
             raise AppError(
                 401,
                 "INVALID_CREDENTIALS",
-                "Email or password is incorrect",
+                "Current password is incorrect",
             )
-        return user
+        user.password_hash = hash_password(new_password)
+        self._commit()
+
+    @staticmethod
+    def _raise_invalid_credentials() -> None:
+        # One generic message so the API never reveals which emails exist.
+        raise AppError(
+            401,
+            "INVALID_CREDENTIALS",
+            "Email or password is incorrect",
+        )
 
     def create_session(self, user: User) -> IssuedSession:
         token = generate_session_token()

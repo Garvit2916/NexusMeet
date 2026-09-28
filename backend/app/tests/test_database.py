@@ -6,7 +6,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import text
 
 from app.core.config import Settings
-from app.db.init_db import initialize_database
+from app.db.init_db import CURRENT_SCHEMA_REVISION, _known_revision_order, initialize_database
 from app.db.seed import seed_database
 from app.main import create_app
 from app.models.user import User
@@ -34,7 +34,7 @@ def test_sqlite_foreign_keys_and_indexes_are_enabled(client: TestClient) -> None
         }
 
     assert foreign_keys == 1
-    assert migration_revision == "0003_auth_and_host_controls"
+    assert migration_revision == CURRENT_SCHEMA_REVISION
     assert "ix_meetings_host_created_at" in indexes
     assert "ix_meetings_status_scheduled_at" in indexes
     assert "ix_meeting_participants_user_meeting" in indexes
@@ -47,6 +47,67 @@ def test_sqlite_foreign_keys_and_indexes_are_enabled(client: TestClient) -> None
         .all()
     }
     assert "password_hash" in user_columns
+
+
+def test_bootstrap_stamp_never_moves_backwards(tmp_path: Path) -> None:
+    """A stamp ahead of the bootstrap must survive, or `alembic upgrade head`
+    would replay a migration against tables that already exist."""
+    database_path = (tmp_path / "ahead.db").as_posix()
+    settings = Settings(
+        app_name="NexusMeet Stamp Test",
+        database_url=f"sqlite:///{database_path}",
+        seed_sample_data=False,
+    )
+    application = create_app(settings)
+    engine = application.state.database.engine
+    initialize_database(engine)
+
+    with engine.begin() as connection:
+        connection.execute(
+            text("UPDATE alembic_version SET version_num = '9999_future_revision'")
+        )
+
+    initialize_database(engine)
+
+    stamped = engine.connect().execute(
+        text("SELECT version_num FROM alembic_version")
+    ).scalar_one()
+    assert stamped == "9999_future_revision"
+
+
+def test_bootstrap_advances_a_stale_stamp_forward(tmp_path: Path) -> None:
+    database_path = (tmp_path / "stale.db").as_posix()
+    settings = Settings(
+        app_name="NexusMeet Stamp Forward Test",
+        database_url=f"sqlite:///{database_path}",
+        seed_sample_data=False,
+    )
+    application = create_app(settings)
+    engine = application.state.database.engine
+    initialize_database(engine)
+
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                "UPDATE alembic_version "
+                "SET version_num = '0001_initial'"
+            )
+        )
+
+    initialize_database(engine)
+
+    stamped = engine.connect().execute(
+        text("SELECT version_num FROM alembic_version")
+    ).scalar_one()
+    assert stamped == CURRENT_SCHEMA_REVISION
+
+
+def test_bootstrap_stamp_tracks_the_newest_migration_file() -> None:
+    """A new migration must be mirrored in CURRENT_SCHEMA_REVISION, otherwise the
+    bootstrap silently pins the database to a stale revision."""
+    order = _known_revision_order()
+    assert order, "no revisions found in alembic/versions"
+    assert order[-1] == CURRENT_SCHEMA_REVISION
 
 
 def test_sample_seed_is_idempotent(tmp_path: Path) -> None:

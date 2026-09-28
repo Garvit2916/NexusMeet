@@ -2,7 +2,10 @@ import { Suspense } from "react";
 import { SignInForm } from "@/components/auth/sign-in-form";
 import { LoadingState } from "@/components/ui/loading";
 
-export const metadata = { title: "Sign in" };
+export const metadata = {
+  title: "Sign in",
+  description: "Sign in to host or join a NexusMeet meeting.",
+};
 
 export default function LoginPage() {
   return (

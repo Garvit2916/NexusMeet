@@ -9,14 +9,21 @@ function initialsFor(name: string) {
   return `${pieces[0][0]}${pieces.at(-1)?.[0] ?? ""}`.toUpperCase();
 }
 
-export function normalizeUser(raw: ApiUser, fallbackRole: User["role"] = "attendee"): User {
+/**
+ * Turn an API account into the UI shape.
+ *
+ * `meetingRole` is the role this user holds in a specific meeting, supplied by
+ * the caller. It is never read from the account payload, because the API does
+ * not put one there.
+ */
+export function normalizeUser(raw: ApiUser, meetingRole: User["role"] = "attendee"): User {
   const name = raw.name.trim() || "Guest";
   return {
     id: raw.id,
     name,
     email: raw.email,
-    initials: raw.initials || initialsFor(name),
-    role: raw.role === "host" || raw.role === "presenter" ? raw.role : fallbackRole,
+    initials: initialsFor(name),
+    role: meetingRole,
     avatarUrl: raw.avatar_url ?? raw.avatarUrl ?? undefined,
   };
 }

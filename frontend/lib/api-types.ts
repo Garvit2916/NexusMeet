@@ -4,6 +4,14 @@ export type ApiEnvelope<T> = {
   meta?: Record<string, unknown> | null;
 };
 
+/**
+ * The account shape returned by `/auth/*` and `/users/me`, matching
+ * `CurrentUserResponse` on the API exactly.
+ *
+ * Note there is no `role` here: a role is a property of a seat in a specific
+ * meeting, not of the account, so it arrives nested in the participant/host
+ * payload instead. `initials` is likewise derived client-side.
+ */
 export type ApiUser = {
   id: string;
   name: string;
@@ -12,8 +20,8 @@ export type ApiUser = {
   avatarUrl?: string | null;
   created_at?: string;
   updated_at?: string;
-  initials?: string;
-  role?: "host" | "presenter" | "attendee";
+  hosted_meeting_count?: number;
+  joined_meeting_count?: number;
 };
 
 export type ApiParticipant = {
