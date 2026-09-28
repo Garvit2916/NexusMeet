@@ -36,6 +36,7 @@ Remote audio and video are live on the deployment above. Open the same meeting i
 - Secret-safe `[webrtc]` diagnostics reporting candidate types and whether a relay is in use
 - Live signaling status, peer count, and per-peer connection state in the room UI
 - Host mute that disables the guest's real microphone track, not just a UI flag
+- In-meeting chat over the authenticated signaling socket, with server-assigned identity, persisted history, and a replay buffer for late joiners
 - Persisted join, leave, and media-state updates
 - Host-only end meeting, mute/unmute, and remove participant controls backed by the server
 - Participant panel with host, muted-by-host, removed, online, microphone, camera, and screen-share state
@@ -167,13 +168,25 @@ Every inbound message is schema-validated, and an unknown type is rejected with 
 | Client to server | `offer` / `answer` | SDP for one peer |
 | Client to server | `ice-candidate` | ICE candidate for one peer |
 | Client to server | `media-state` | Publish local camera and microphone state |
+| Client to server | `chat` | Send one room-wide chat message |
 | Client to server | `leave` | Leave cleanly |
 | Client to server | `ping` | Keepalive |
-| Server to client | `welcome` | Self identity plus the current peer list |
+| Server to client | `welcome` | Self identity, the current peer list, and recent chat |
 | Server to client | `peer-joined` / `peer-left` | Mesh membership changes |
 | Server to client | `media-state` | Relayed camera and microphone state |
+| Server to client | `chat` | A stored chat message, fanned out to the whole room |
 | Server to client | `ping` / `pong` | Keepalive |
 | Server to client | `error` | Rejected message with a machine-readable code |
+
+Host mute, removal, and end-meeting are ordinary authenticated REST calls listed in the API surface. Their effect reaches other browsers through the signaling channel as relayed media state, which is why a host mute actually disables the guest's microphone track.
+
+### Chat
+
+Chat rides the same authenticated socket as signaling, so it needs no second connection and no second credential. A `chat` frame carries only the message text: the sender, timestamp, and message id are all assigned by the server, so a client cannot post as someone else or backdate a message by sending its own fields. The server assigns the identity, strips control and zero-width characters, normalises whitespace, refuses anything empty or over 1000 characters, and stores the result before broadcasting it to every peer including the sender.
+
+Because the sender receives its own message back through the same broadcast as everyone else, the transcript is always exactly what was stored rather than a mix of stored and optimistic local copies. The message id is the deduplication key, so the chat history replayed in `welcome` on reconnect cannot duplicate the tail of the conversation.
+
+`GET /meetings/{id}/messages` serves the same replay buffer over REST, which is how a client pages in older messages or recovers a transcript without re-establishing the socket. Every read and write re-derives the caller's participant row rather than trusting an id from the request, so a participant who has left or been removed loses both the send and the read path immediately. Message bodies are rendered as text on the client and are never written to the logs.
 
 Host mute, removal, and end-meeting are ordinary authenticated REST calls listed in the API surface. Their effect reaches other browsers through the signaling channel as relayed media state, which is why a host mute actually disables the guest's microphone track.
 
@@ -240,7 +253,7 @@ A participant tile reports one of `live`, `connecting`, `camera-off`, or `failed
 
 The media layer writes one structured line per event to the browser console, prefixed `[webrtc]`. This is how a failure that only reproduces between two real networks gets diagnosed, so it is on in production.
 
-Tickets, passwords, session cookies, SDP bodies, and candidate addresses are never logged; only message types, candidate types, byte counts, and connection states are.
+Tickets, passwords, session cookies, SDP bodies, candidate addresses, and chat message text are never logged; only message types, candidate types, byte counts, and connection states are.
 
 The ICE configuration is reduced to a presence report. `configured=TURN(1),STUN(1)` means one TURN entry and one STUN entry were offered; the relay hostname, username, and credential are deliberately absent, so a reader can confirm TURN was offered without learning the secret.
 
@@ -313,6 +326,7 @@ Errors use a stable error envelope with a machine-readable `error.code`.
 | `PATCH` | `/meetings/{id}/participants/me/media` | Update own media state |
 | `POST` | `/meetings/{id}/participants/{participant_id}/mute` | Host mutes or unmutes a participant |
 | `DELETE` | `/meetings/{id}/participants/{participant_id}` | Host removes a participant |
+| `GET` | `/meetings/{id}/messages` | Recent chat history (authenticated participant) |
 | `POST` | `/meetings/{id}/ws-ticket` | Mint a short-lived signaling ticket for the WebSocket |
 
 One endpoint is not REST: the signaling socket is `GET /ws/meetings/{id}?ticket=...` as a WebSocket upgrade at the API root, outside the `/api/v1` prefix, because browsers cannot send an authenticated `POST` to a WebSocket handshake.
@@ -348,7 +362,8 @@ WebRTC cannot be covered by unit tests alone, because the interesting failures l
 3. Allow camera and microphone in both, press **Check devices**, then **Join meeting**.
 4. Confirm each side shows the other's live video tile and a `Media connected · 1 peer` status.
 5. Toggle camera and microphone on one side and watch the remote tile update, then exercise the host controls in the participants panel.
-6. In the browser network panel, confirm `POST /api/v1/meetings/{id}/ws-ticket` returns `200` and the `wss://` request to `/ws/meetings/{id}` returns `101`. Anything else is the first thing to check, per **Deployment**.
+6. Open **Chat** in both rooms, send a message from each side, and confirm both transcripts show both messages. Reload one browser and confirm the replayed history is still there without duplicates.
+7. In the browser network panel, confirm `POST /api/v1/meetings/{id}/ws-ticket` returns `200` and the `wss://` request to `/ws/meetings/{id}` returns `101`. Anything else is the first thing to check, per **Deployment**.
 
 Two useful signals when a deployed room shows a media error with zero peers: a `404` on `ws-ticket` means the API build predates the signaling route, and a `400` on the CORS preflight means the app origin is missing from `CORS_ORIGINS`. A refused WebSocket handshake returns `403` with an empty body, because the API closes the socket before accepting it.
 

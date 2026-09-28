@@ -12,6 +12,7 @@ from app.db.session import get_db
 from app.models.user import User
 from app.repositories.user_repository import UserRepository
 from app.services.auth_service import AuthService
+from app.services.chat_service import ChatService
 from app.services.meeting_service import MeetingService
 from app.services.user_service import UserService
 from app.utils.ids import (
@@ -73,6 +74,10 @@ def get_meeting_service(db: Session = Depends(get_db)) -> MeetingService:
     return MeetingService(db)
 
 
+def get_chat_service(db: Session = Depends(get_db)) -> ChatService:
+    return ChatService(db)
+
+
 def get_user_service(db: Session = Depends(get_db)) -> UserService:
     return UserService(UserRepository(db))
 
@@ -92,6 +97,7 @@ def require_meeting_host(
 
 __all__ = [
     "get_auth_service",
+    "get_chat_service",
     "get_current_user",
     "get_meeting_service",
     "get_optional_current_user",

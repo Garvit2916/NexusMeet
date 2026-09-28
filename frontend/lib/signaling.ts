@@ -94,9 +94,63 @@ export type MediaStateUpdate = {
   screenSharing?: boolean;
 };
 
+/** Longest message the server will store, mirrored so the UI can refuse early. */
+export const CHAT_MAX_LENGTH = 1000;
+
+/**
+ * One chat message, exactly as the server sends it.
+ *
+ * `id` is assigned server-side, so it is also the deduplication key: the sender
+ * receives its own message back through the same broadcast as everyone else
+ * rather than optimistically appending a local copy that could disagree with
+ * what was actually stored.
+ */
+export type ChatMessage = {
+  id: number;
+  userId: string;
+  participantId: number;
+  senderName: string;
+  body: string;
+  createdAt: string;
+};
+
+/**
+ * Characters that carry no visible meaning in a chat line.
+ *
+ * The server strips exactly this set before storing, so the client has to strip
+ * it too. Without that, a message made only of zero-width characters passes the
+ * local blank check and is then rejected by the server as empty, which looks to
+ * the user like a message that was silently lost.
+ */
+const INVISIBLE_CHAT_CHARS = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F-\u009F\u200B-\u200F\u202A-\u202E\u2066-\u2069\uFEFF]/g;
+
+/**
+ * Reduce a draft to the text that will actually be stored.
+ *
+ * This mirrors the server's normalisation exactly, so what the length check
+ * approves is what the server receives.
+ */
+export function normalizeChatDraft(draft: string): string {
+  return draft.replace(INVISIBLE_CHAT_CHARS, "").replace(/\s+/g, " ").trim();
+}
+
+export function chatDraftError(draft: string, canSend: boolean): string | null {
+  const normalized = normalizeChatDraft(draft);
+  if (!normalized) return canSend ? null : "Reconnect to send messages.";
+  if (normalized.length > CHAT_MAX_LENGTH) {
+    return `Messages are limited to ${CHAT_MAX_LENGTH} characters.`;
+  }
+  return null;
+}
+
 export const SIGNALING_ERROR_MESSAGES: Record<string, string> = {
   UNKNOWN_TARGET: "A participant left before that message could be delivered.",
   INVALID_MESSAGE: "The signaling server rejected a message from this browser.",
+  MESSAGE_EMPTY: "That message was empty.",
+  MESSAGE_TOO_LONG: "That message was too long.",
+  CHAT_ACCESS_DENIED: "You can no longer use chat in this meeting.",
+  CHAT_UNAVAILABLE: "Your message could not be sent.",
+  MEETING_NOT_LIVE: "This meeting is no longer live.",
 };
 
 export const SIGNALING_STATUS_TEXT: Record<SignalingStatus, string> = {

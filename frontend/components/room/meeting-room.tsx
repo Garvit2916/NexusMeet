@@ -2,10 +2,11 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useRouter } from "next/navigation";
-import { ArrowLeft, Camera, CameraOff, Copy, Mic, MicOff, PhoneOff, ShieldCheck, Square, UsersRound, Video } from "lucide-react";
+import { ArrowLeft, Camera, CameraOff, Copy, MessageSquare, Mic, MicOff, PhoneOff, ShieldCheck, Square, UsersRound, Video } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { LoadingState } from "@/components/ui/loading";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
+import { ChatPanel } from "@/components/room/chat-panel";
 import { ParticipantPanel } from "@/components/room/participant-panel";
 import { LocalVideo } from "@/components/room/local-video";
 import { VideoTile } from "@/components/room/video-tile";
@@ -31,6 +32,7 @@ export function MeetingRoom({ meetingId }: { meetingId: string }) {
   const media = useLocalMedia();
   const [phase, setPhase] = useState<"prejoin" | "room">("prejoin");
   const [panelOpen, setPanelOpen] = useState(false);
+  const [chatOpen, setChatOpen] = useState(false);
   const [elapsed, setElapsed] = useState(0);
   const [copied, setCopied] = useState(false);
   const [joinError, setJoinError] = useState<string | null>(null);
@@ -405,6 +407,7 @@ export function MeetingRoom({ meetingId }: { meetingId: string }) {
             <RoomControl label={media.micEnabled ? "Mute" : "Unmute"} active={media.micEnabled} disabled={!media.stream || roomIsClosed || removedByHost} onClick={() => void toggleMicrophone()}><span className={!media.micEnabled ? "rounded-full bg-coral/20 p-1" : ""}>{media.micEnabled ? <Mic className="h-5 w-5" aria-hidden="true" /> : <MicOff className="h-5 w-5" aria-hidden="true" />}</span></RoomControl>
             <RoomControl label={media.cameraEnabled ? "Camera" : "Camera off"} active={media.cameraEnabled} disabled={!media.stream || roomIsClosed || removedByHost} onClick={() => void toggleCamera()}><span className={!media.cameraEnabled ? "rounded-full bg-coral/20 p-1" : ""}>{media.cameraEnabled ? <Camera className="h-5 w-5" aria-hidden="true" /> : <CameraOff className="h-5 w-5" aria-hidden="true" />}</span></RoomControl>
             <RoomControl label="People" active={panelOpen} onClick={() => setPanelOpen((current) => !current)}><UsersRound className="h-5 w-5" aria-hidden="true" /></RoomControl>
+            <RoomControl label="Chat" active={chatOpen} onClick={() => setChatOpen((current) => !current)}><MessageSquare className="h-5 w-5" aria-hidden="true" /></RoomControl>
             {isHost && !roomIsClosed ? <RoomControl label="End for all" active={false} danger disabled={isEnding} onClick={() => setEndDialogOpen(true)}><Square className="h-4 w-4" aria-hidden="true" /></RoomControl> : null}
           </div>
           <RoomControl label="Leave" active={false} danger onClick={() => void leaveRoom()}><PhoneOff className="h-5 w-5" aria-hidden="true" /></RoomControl>
@@ -424,6 +427,20 @@ export function MeetingRoom({ meetingId }: { meetingId: string }) {
           onToggleMute={(participant) => void toggleParticipantMute(participant)}
           onRemoveParticipant={(participant) => setRemoveTarget(participant)}
         />
+        {chatOpen ? (
+          <div className="absolute inset-x-3 bottom-24 z-20 sm:inset-x-auto sm:right-5 sm:bottom-28 sm:top-24 sm:flex sm:justify-end">
+            <ChatPanel
+              open={chatOpen}
+              messages={webrtc.chatMessages}
+              localUserId={user.id}
+              error={webrtc.chatError}
+              canSend={webrtc.status === "connected" && !roomIsClosed && !removedByHost}
+              onSend={webrtc.sendChatMessage}
+              onClearError={webrtc.clearChatError}
+              onClose={() => setChatOpen(false)}
+            />
+          </div>
+        ) : null}
       </main>
       <ConfirmDialog
         open={Boolean(removeTarget)}

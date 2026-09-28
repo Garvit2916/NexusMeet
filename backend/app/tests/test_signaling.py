@@ -6,14 +6,17 @@ import json
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from sqlalchemy.orm import Session, sessionmaker
 from starlette.websockets import WebSocketDisconnect
 
 from app.core.config import Settings
+from app.core.errors import AppError
+from app.models.participant import MeetingParticipant
 from app.realtime.hub import SignalingHub
 from app.realtime.hub import hub as global_hub
 from app.realtime.messages import SignalingProtocolError, parse_client_message
@@ -23,6 +26,8 @@ from app.realtime.tickets import (
     issue_ticket,
     verify_ticket,
 )
+from app.services.chat_service import ChatService
+from app.utils.time import utc_now
 
 ALLOWED_ORIGIN = "http://localhost:3000"
 FOREIGN_ORIGIN = "https://evil.example.com"
@@ -161,9 +166,7 @@ def test_ticket_rejected_for_removed_participant(
         if item["user"]["email"] == "attendee@nexusmeet.dev"
     )
     assert (
-        client.delete(
-            f"/api/v1/meetings/{meeting_id}/participants/{participant_id}"
-        ).status_code
+        client.delete(f"/api/v1/meetings/{meeting_id}/participants/{participant_id}").status_code
         == 200
     )
 
@@ -409,6 +412,35 @@ def test_oversized_frame_is_rejected() -> None:
         parse_client_message(payload)
 
 
+def test_valid_chat_message_parses() -> None:
+    message = parse_client_message('{"type":"chat","body":"hello room"}')
+    assert message.type == "chat"
+    assert message.body == "hello room"
+
+
+def test_chat_cannot_smuggle_sender_identity() -> None:
+    """The server owns identity, so a client-supplied sender field is refused."""
+    with pytest.raises(SignalingProtocolError):
+        parse_client_message(
+            '{"type":"chat","body":"hi","user_id":"someone-else","sender_name":"Host"}'
+        )
+
+
+def test_blank_chat_message_is_rejected() -> None:
+    with pytest.raises(SignalingProtocolError):
+        parse_client_message('{"type":"chat","body":"   "}')
+
+
+def test_overlong_chat_message_is_rejected() -> None:
+    with pytest.raises(SignalingProtocolError):
+        parse_client_message(json.dumps({"type": "chat", "body": "a" * 1001}))
+
+
+def test_chat_at_the_length_limit_is_accepted() -> None:
+    message = parse_client_message(json.dumps({"type": "chat", "body": "a" * 1000}))
+    assert message.type == "chat"
+
+
 def test_valid_messages_parse() -> None:
     join = parse_client_message('{"type":"join"}')
     assert join.type == "join"
@@ -429,10 +461,13 @@ def test_valid_messages_parse() -> None:
 
 def test_socket_rejects_missing_ticket(client: TestClient) -> None:
     meeting_id = create_live_meeting(client)
-    with pytest.raises(WebSocketDisconnect), client.websocket_connect(
-        f"/ws/meetings/{meeting_id}",
-        cookies={"nexusmeet_session": client.cookies.get("nexusmeet_session") or ""},
-        headers={"origin": ALLOWED_ORIGIN},
+    with (
+        pytest.raises(WebSocketDisconnect),
+        client.websocket_connect(
+            f"/ws/meetings/{meeting_id}",
+            cookies={"nexusmeet_session": client.cookies.get("nexusmeet_session") or ""},
+            headers={"origin": ALLOWED_ORIGIN},
+        ),
     ):
         pass
 
@@ -441,10 +476,13 @@ def test_socket_rejects_forged_ticket(client: TestClient) -> None:
     meeting_id = create_live_meeting(client)
     forged = mint_ticket(client, meeting_id)["ticket"]
     payload, _, signature = forged.partition(".")
-    with pytest.raises(WebSocketDisconnect), client.websocket_connect(
-        f"/ws/meetings/{meeting_id}?ticket={payload}.{signature[:-2]}xy",
-        cookies={"nexusmeet_session": client.cookies.get("nexusmeet_session") or ""},
-        headers={"origin": ALLOWED_ORIGIN},
+    with (
+        pytest.raises(WebSocketDisconnect),
+        client.websocket_connect(
+            f"/ws/meetings/{meeting_id}?ticket={payload}.{signature[:-2]}xy",
+            cookies={"nexusmeet_session": client.cookies.get("nexusmeet_session") or ""},
+            headers={"origin": ALLOWED_ORIGIN},
+        ),
     ):
         pass
 
@@ -452,12 +490,15 @@ def test_socket_rejects_forged_ticket(client: TestClient) -> None:
 def test_socket_rejects_foreign_origin(client: TestClient) -> None:
     meeting_id = create_live_meeting(client)
     ticket = mint_ticket(client, meeting_id)["ticket"]
-    with pytest.raises(WebSocketDisconnect), open_socket(
-        client,
-        meeting_id,
-        ticket,
-        token=str(client.cookies.get("nexusmeet_session")),
-        origin=FOREIGN_ORIGIN,
+    with (
+        pytest.raises(WebSocketDisconnect),
+        open_socket(
+            client,
+            meeting_id,
+            ticket,
+            token=str(client.cookies.get("nexusmeet_session")),
+            origin=FOREIGN_ORIGIN,
+        ),
     ):
         pass
 
@@ -472,15 +513,16 @@ def test_socket_rejects_a_valid_ticket_for_a_non_participant(
     cannot be used to sit in on a room.
     """
     meeting_id = create_live_meeting(client)
-    ticket, _ = issue_ticket(
-        app.state.settings, user_id=other_user_id, meeting_id=meeting_id
-    )
+    ticket, _ = issue_ticket(app.state.settings, user_id=other_user_id, meeting_id=meeting_id)
 
-    with pytest.raises(WebSocketDisconnect), open_socket(
-        client,
-        meeting_id,
-        ticket,
-        token=str(client.cookies.get("nexusmeet_session")),
+    with (
+        pytest.raises(WebSocketDisconnect),
+        open_socket(
+            client,
+            meeting_id,
+            ticket,
+            token=str(client.cookies.get("nexusmeet_session")),
+        ),
     ):
         pass
 
@@ -490,18 +532,22 @@ def test_socket_rejects_ended_meeting(client: TestClient) -> None:
     ticket = mint_ticket(client, meeting_id)["ticket"]
     assert client.post(f"/api/v1/meetings/{meeting_id}/end").status_code == 200
 
-    with pytest.raises(WebSocketDisconnect), open_socket(
-        client, meeting_id, ticket, token=str(client.cookies.get("nexusmeet_session"))
+    with (
+        pytest.raises(WebSocketDisconnect),
+        open_socket(client, meeting_id, ticket, token=str(client.cookies.get("nexusmeet_session"))),
     ):
         pass
 
 
 def test_socket_rejects_unknown_meeting(client: TestClient) -> None:
     missing = "mtg_" + "0" * 32
-    with pytest.raises(WebSocketDisconnect), client.websocket_connect(
-        f"/ws/meetings/{missing}?ticket={'t' * 32}",
-        cookies={"nexusmeet_session": client.cookies.get("nexusmeet_session") or ""},
-        headers={"origin": ALLOWED_ORIGIN},
+    with (
+        pytest.raises(WebSocketDisconnect),
+        client.websocket_connect(
+            f"/ws/meetings/{missing}?ticket={'t' * 32}",
+            cookies={"nexusmeet_session": client.cookies.get("nexusmeet_session") or ""},
+            headers={"origin": ALLOWED_ORIGIN},
+        ),
     ):
         pass
 
@@ -647,9 +693,7 @@ def test_signaling_to_another_meeting_is_refused(
             assert error["code"] == "UNKNOWN_TARGET"
 
 
-def test_media_state_is_broadcast_to_peers(
-    client: TestClient, attendee_client: TestClient
-) -> None:
+def test_media_state_is_broadcast_to_peers(client: TestClient, attendee_client: TestClient) -> None:
     meeting_id = create_live_meeting(client)
     assert attendee_client.post(f"/api/v1/meetings/{meeting_id}/join").status_code == 200
 
@@ -811,9 +855,7 @@ def test_host_remove_closes_the_target_socket(
             read(host)
             read(host)
 
-            response = client.delete(
-                f"/api/v1/meetings/{meeting_id}/participants/{participant_id}"
-            )
+            response = client.delete(f"/api/v1/meetings/{meeting_id}/participants/{participant_id}")
             assert response.status_code == 200, response.text
 
             event = read(guest)
@@ -872,8 +914,9 @@ def test_room_limit_refuses_a_new_peer(
     ) as host:
         read(host)
         # The guest holds a valid ticket but the mesh is already full.
-        with pytest.raises(WebSocketDisconnect), open_socket(
-            client, meeting_id, guest_ticket, token=attendee_token(attendee_client)
+        with (
+            pytest.raises(WebSocketDisconnect),
+            open_socket(client, meeting_id, guest_ticket, token=attendee_token(attendee_client)),
         ):
             pass
         assert global_hub.room_size(meeting_id) == 1
@@ -911,6 +954,269 @@ class FakeSocket:
         self.closed = code
 
 
+# --- chat ------------------------------------------------------------------
+
+
+def open_chat_room(
+    client: TestClient, attendee_client: TestClient, meeting_id: str
+) -> tuple[Any, Any]:
+    """Connect a host and an attendee socket, drained up to their idle state.
+
+    Returns the two sockets already positioned so the next frame each receives is
+    the one a real message produces.
+    """
+    host_socket = client.websocket_connect(
+        f"/ws/meetings/{meeting_id}?ticket={mint_ticket(client, meeting_id)['ticket']}",
+        cookies={"nexusmeet_session": str(client.cookies.get("nexusmeet_session"))},
+        headers={"origin": ALLOWED_ORIGIN},
+    ).__enter__()
+    read(host_socket)
+    guest_socket = client.websocket_connect(
+        f"/ws/meetings/{meeting_id}?ticket={mint_ticket(attendee_client, meeting_id)['ticket']}",
+        cookies={"nexusmeet_session": attendee_token(attendee_client)},
+        headers={"origin": ALLOWED_ORIGIN},
+    ).__enter__()
+    read(guest_socket)
+    read(host_socket)  # peer-joined
+    read(host_socket)  # media-state
+    return host_socket, guest_socket
+
+
+def test_chat_is_broadcast_to_every_peer_including_the_sender(
+    client: TestClient, attendee_client: TestClient
+) -> None:
+    meeting_id = create_live_meeting(client)
+    assert attendee_client.post(f"/api/v1/meetings/{meeting_id}/join").status_code == 200
+
+    host_socket, guest_socket = open_chat_room(client, attendee_client, meeting_id)
+    try:
+        guest_socket.send_json({"type": "chat", "body": "hello everyone"})
+
+        for socket in (guest_socket, host_socket):
+            frame = read(socket)
+            assert frame["type"] == "chat"
+            assert frame["message"]["body"] == "hello everyone"
+            assert frame["message"]["id"] > 0
+            assert frame["message"]["user_id"]
+            assert frame["message"]["created_at"]
+    finally:
+        host_socket.__exit__(None, None, None)
+        guest_socket.__exit__(None, None, None)
+
+
+def test_chat_does_not_leak_into_another_meeting(
+    client: TestClient, attendee_client: TestClient
+) -> None:
+    """A ticket for one room must not let its owner read another room's chat."""
+    first = create_live_meeting(client)
+    second = create_live_meeting(client)
+    assert attendee_client.post(f"/api/v1/meetings/{first}/join").status_code == 200
+    assert attendee_client.post(f"/api/v1/meetings/{second}/join").status_code == 200
+
+    host_a, guest_a = open_chat_room(client, attendee_client, first)
+    try:
+        guest_a.send_json({"type": "chat", "body": "private to room one"})
+        read(guest_a)
+        read(host_a)
+
+        history = client.get(f"/api/v1/meetings/{second}/messages")
+        assert history.status_code == 200, history.text
+        assert history.json()["data"] == []
+    finally:
+        host_a.__exit__(None, None, None)
+        guest_a.__exit__(None, None, None)
+
+
+def test_welcome_replays_chat_history_for_a_late_joiner(
+    client: TestClient, attendee_client: TestClient
+) -> None:
+    """Someone who joins mid-meeting must not land in a blank transcript."""
+    meeting_id = create_live_meeting(client)
+    assert attendee_client.post(f"/api/v1/meetings/{meeting_id}/join").status_code == 200
+
+    host_socket, guest_socket = open_chat_room(client, attendee_client, meeting_id)
+    try:
+        host_socket.send_json({"type": "chat", "body": "before the late join"})
+        read(host_socket)
+        read(guest_socket)
+
+        late_ticket = mint_ticket(attendee_client, meeting_id)["ticket"]
+        late = client.websocket_connect(
+            f"/ws/meetings/{meeting_id}?ticket={late_ticket}",
+            cookies={"nexusmeet_session": attendee_token(attendee_client)},
+            headers={"origin": ALLOWED_ORIGIN},
+        ).__enter__()
+        try:
+            welcome = read(late)
+            assert welcome["type"] == "welcome"
+            bodies = [item["body"] for item in welcome["messages"]]
+            assert "before the late join" in bodies
+        finally:
+            late.__exit__(None, None, None)
+    finally:
+        host_socket.__exit__(None, None, None)
+        guest_socket.__exit__(None, None, None)
+
+
+def test_chat_from_a_removed_participant_is_refused(
+    app: Any, client: TestClient, attendee_client: TestClient
+) -> None:
+    """Removal must close the send path, not merely the socket.
+
+    The host's removal normally also disconnects the socket, so this exercises
+    the service guard directly: a removed participant who somehow retains a live
+    connection still must not be able to post.
+    """
+    meeting_id = create_live_meeting(client)
+    joined = attendee_client.post(f"/api/v1/meetings/{meeting_id}/join")
+    participant_id = next(
+        item["id"]
+        for item in joined.json()["data"]["participants"]
+        if item["user"]["email"] == "attendee@nexusmeet.dev"
+    )
+    attendee_user_id = attendee_client.get("/api/v1/auth/me").json()["data"]["id"]
+
+    with cast(sessionmaker[Session], app.state.session_factory)() as session:
+        participant = session.get(MeetingParticipant, participant_id)
+        assert participant is not None
+        participant.removed_at = utc_now()
+        session.commit()
+
+        with pytest.raises(AppError) as raised:
+            ChatService(session).post_message(
+                meeting_id, user_id=attendee_user_id, raw_body="am I still here?"
+            )
+    assert raised.value.code == "CHAT_ACCESS_DENIED"
+
+
+def test_blank_chat_body_is_refused_without_broadcasting(
+    client: TestClient, attendee_client: TestClient
+) -> None:
+    meeting_id = create_live_meeting(client)
+    assert attendee_client.post(f"/api/v1/meetings/{meeting_id}/join").status_code == 200
+
+    host_socket, guest_socket = open_chat_room(client, attendee_client, meeting_id)
+    try:
+        guest_socket.send_json({"type": "chat", "body": "   \u200b  "})
+        frame = read(guest_socket)
+        assert frame["type"] == "error"
+        assert frame["code"] == "MESSAGE_EMPTY"
+
+        history = client.get(f"/api/v1/meetings/{meeting_id}/messages")
+        assert history.json()["data"] == []
+    finally:
+        host_socket.__exit__(None, None, None)
+        guest_socket.__exit__(None, None, None)
+
+
+def test_chat_body_is_stored_as_plain_text(client: TestClient, attendee_client: TestClient) -> None:
+    """A script-shaped payload must survive as literal text, never as markup."""
+    meeting_id = create_live_meeting(client)
+    assert attendee_client.post(f"/api/v1/meetings/{meeting_id}/join").status_code == 200
+
+    payload = "<script>alert('xss')</script> <img src=x onerror=alert(1)>"
+    host_socket, guest_socket = open_chat_room(client, attendee_client, meeting_id)
+    try:
+        guest_socket.send_json({"type": "chat", "body": payload})
+        assert read(guest_socket)["message"]["body"] == payload
+        assert read(host_socket)["message"]["body"] == payload
+    finally:
+        host_socket.__exit__(None, None, None)
+        guest_socket.__exit__(None, None, None)
+
+    stored = client.get(f"/api/v1/meetings/{meeting_id}/messages")
+    assert stored.json()["data"][-1]["body"] == payload
+
+
+def test_chat_history_endpoint_requires_authentication(anonymous_client: TestClient) -> None:
+    owner = TestClient(anonymous_client.app)
+    owner.post(
+        "/api/v1/auth/register",
+        json={"name": "Owner", "email": "owner2@nexusmeet.dev", "password": "owner-pass-1"},
+    )
+    meeting_id = create_live_meeting(owner)
+
+    response = anonymous_client.get(f"/api/v1/meetings/{meeting_id}/messages")
+    assert response.status_code == 401
+    assert response.json()["error"]["code"] == "UNAUTHENTICATED"
+
+
+def test_chat_history_is_refused_to_a_non_participant(
+    client: TestClient, attendee_client: TestClient
+) -> None:
+    meeting_id = create_live_meeting(client)
+    outsider = TestClient(client.app)
+    outsider.post(
+        "/api/v1/auth/register",
+        json={"name": "Outsider", "email": "outsider@nexusmeet.dev", "password": "outsider-pass-1"},
+    )
+
+    response = outsider.get(f"/api/v1/meetings/{meeting_id}/messages")
+    assert response.status_code == 403
+    assert response.json()["error"]["code"] == "CHAT_ACCESS_DENIED"
+
+
+def test_chat_history_returns_messages_oldest_first(
+    client: TestClient, attendee_client: TestClient
+) -> None:
+    meeting_id = create_live_meeting(client)
+    assert attendee_client.post(f"/api/v1/meetings/{meeting_id}/join").status_code == 200
+
+    host_socket, guest_socket = open_chat_room(client, attendee_client, meeting_id)
+    try:
+        for body in ("first", "second", "third"):
+            guest_socket.send_json({"type": "chat", "body": body})
+            read(guest_socket)
+            read(host_socket)
+    finally:
+        host_socket.__exit__(None, None, None)
+        guest_socket.__exit__(None, None, None)
+
+    response = client.get(f"/api/v1/meetings/{meeting_id}/messages")
+    assert response.status_code == 200, response.text
+    data = response.json()["data"]
+    assert [item["body"] for item in data] == ["first", "second", "third"]
+    assert all(item["sender_name"] for item in data)
+
+
+def test_chat_history_respects_its_limit(client: TestClient, attendee_client: TestClient) -> None:
+    meeting_id = create_live_meeting(client)
+    assert attendee_client.post(f"/api/v1/meetings/{meeting_id}/join").status_code == 200
+
+    host_socket, guest_socket = open_chat_room(client, attendee_client, meeting_id)
+    try:
+        for index in range(5):
+            guest_socket.send_json({"type": "chat", "body": f"message {index}"})
+            read(guest_socket)
+            read(host_socket)
+    finally:
+        host_socket.__exit__(None, None, None)
+        guest_socket.__exit__(None, None, None)
+
+    response = client.get(f"/api/v1/meetings/{meeting_id}/messages?limit=2")
+    data = response.json()["data"]
+    # The limit keeps the newest messages, still in reading order.
+    assert [item["body"] for item in data] == ["message 3", "message 4"]
+
+
+def test_chat_history_limit_is_bounded(client: TestClient, attendee_client: TestClient) -> None:
+    meeting_id = create_live_meeting(client)
+    assert attendee_client.post(f"/api/v1/meetings/{meeting_id}/join").status_code == 200
+
+    response = client.get(f"/api/v1/meetings/{meeting_id}/messages?limit=5000")
+    assert response.status_code == 422
+
+
+def test_chat_is_closed_once_the_meeting_has_ended(client: TestClient) -> None:
+    """Ending the meeting deactivates its participants, closing the send path."""
+    meeting_id = create_live_meeting(client)
+    assert client.post(f"/api/v1/meetings/{meeting_id}/end").status_code == 200
+
+    response = client.get(f"/api/v1/meetings/{meeting_id}/messages")
+    assert response.status_code == 403
+    assert response.json()["error"]["code"] == "CHAT_ACCESS_DENIED"
+
+
 def build_connection(local_hub: SignalingHub, connection_id: str, user_id: str) -> Any:
     from app.realtime.hub import SignalingConnection
 
@@ -921,7 +1227,7 @@ def build_connection(local_hub: SignalingHub, connection_id: str, user_id: str) 
         participant_id=1,
         display_name=user_id,
         is_host=False,
-        websocket=FakeSocket(),
+        websocket=cast(Any, FakeSocket()),
     )
 
 
@@ -980,6 +1286,7 @@ def test_send_to_user_reaches_every_socket_that_user_holds() -> None:
     assert asyncio.run(scenario()) == 1
     assert other.websocket.sent
 
+
 # --- production secret hygiene ------------------------------------------------
 
 
@@ -991,9 +1298,7 @@ def production_settings(app: Any, **overrides: Any) -> Iterator[None]:
     dependency path instead of a test-only override.
     """
     original = app.state.settings
-    app.state.settings = original.model_copy(
-        update={"environment": "production", **overrides}
-    )
+    app.state.settings = original.model_copy(update={"environment": "production", **overrides})
     try:
         yield
     finally:
@@ -1011,18 +1316,14 @@ def test_production_refuses_to_sign_with_the_development_secret(
     assert response.json()["error"]["code"] == "SIGNALING_NOT_CONFIGURED"
 
 
-def test_missing_secret_keeps_the_rest_of_the_api_working(
-    app: Any, client: TestClient
-) -> None:
+def test_missing_secret_keeps_the_rest_of_the_api_working(app: Any, client: TestClient) -> None:
     """Failing closed on signaling must not take down auth or meetings."""
     with production_settings(app):
         assert client.get("/api/v1/auth/me").status_code == 200
         assert client.get("/api/v1/meetings").status_code == 200
 
 
-def test_production_issues_a_ticket_once_a_real_secret_is_set(
-    app: Any, client: TestClient
-) -> None:
+def test_production_issues_a_ticket_once_a_real_secret_is_set(app: Any, client: TestClient) -> None:
     meeting_id = create_live_meeting(client)
     with production_settings(app, ws_ticket_secret="a-real-production-secret"):
         response = client.post(f"/api/v1/meetings/{meeting_id}/ws-ticket")

@@ -10,9 +10,12 @@ from fastapi import APIRouter, Path, Query, WebSocket, WebSocketDisconnect
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.core.config import Settings
+from app.core.errors import AppError
+from app.models.chat import MeetingChatMessage
 from app.models.enums import MeetingStatus
 from app.realtime.hub import SignalingConnection, hub
 from app.realtime.messages import (
+    ChatMessage,
     IceCandidateMessage,
     JoinMessage,
     LeaveMessage,
@@ -25,6 +28,7 @@ from app.realtime.messages import (
 from app.realtime.tickets import InvalidTicketError, ice_servers, verify_ticket
 from app.repositories.meeting_repository import MeetingRepository
 from app.repositories.participant_repository import ParticipantRepository
+from app.services.chat_service import CHAT_HISTORY_LIMIT, ChatService
 from app.utils.ids import (
     MEETING_ID_MAX_LENGTH,
     MEETING_IDENTIFIER_MIN_LENGTH,
@@ -140,6 +144,9 @@ async def meeting_signaling_socket(
             "self": connection.describe(),
             "peers": [peer.describe() for peer in peers],
             "ice_servers": ice_servers(settings),
+            # Replay the tail of the transcript so someone who joins late, or
+            # reconnects after a drop, does not land in a blank panel.
+            "messages": _chat_history(session_factory, connection.meeting_id, connection.user_id),
         },
     )
     await hub.broadcast(
@@ -152,7 +159,7 @@ async def meeting_signaling_socket(
     heartbeat = asyncio.create_task(_heartbeat(websocket))
     try:
         while True:
-            await _handle_message(connection, await websocket.receive_text())
+            await _handle_message(connection, await websocket.receive_text(), session_factory)
     except WebSocketDisconnect:
         pass
     except Exception:
@@ -199,7 +206,11 @@ async def _broadcast_media_state(connection: SignalingConnection) -> None:
     )
 
 
-async def _handle_message(connection: SignalingConnection, raw: str) -> None:
+async def _handle_message(
+    connection: SignalingConnection,
+    raw: str,
+    session_factory: sessionmaker[Session],
+) -> None:
     try:
         message = parse_client_message(raw)
     except SignalingProtocolError as error:
@@ -222,7 +233,14 @@ async def _handle_message(connection: SignalingConnection, raw: str) -> None:
         ]
         await hub.send(
             connection,
-            {"type": "welcome", "self": connection.describe(), "peers": peers},
+            {
+                "type": "welcome",
+                "self": connection.describe(),
+                "peers": peers,
+                "messages": _chat_history(
+                    session_factory, connection.meeting_id, connection.user_id
+                ),
+            },
         )
         return
 
@@ -237,8 +255,104 @@ async def _handle_message(connection: SignalingConnection, raw: str) -> None:
         await _broadcast_media_state(connection)
         return
 
+    if isinstance(message, ChatMessage):
+        await _handle_chat(connection, message, session_factory)
+        return
+
     if isinstance(message, PingMessage):
         await hub.send(connection, {"type": "pong"})
+
+
+def _chat_history(
+    session_factory: sessionmaker[Session],
+    meeting_id: str,
+    user_id: str,
+    *,
+    limit: int = CHAT_HISTORY_LIMIT,
+) -> list[dict[str, Any]]:
+    """Read the replay buffer, degrading to an empty transcript on failure.
+
+    A database hiccup must not cost the peer its media session, so history is
+    treated as best-effort context rather than a condition for joining.
+    """
+    try:
+        with session_factory() as session:
+            messages = ChatService(session).list_messages(meeting_id, user_id=user_id, limit=limit)
+    except AppError as error:
+        logger.info("Chat history unavailable: %s", error.code)
+        return []
+    except Exception:
+        logger.exception("Chat history read failed", extra={"meeting_id": meeting_id})
+        return []
+    return [_describe_chat(message) for message in messages]
+
+
+def _describe_chat(message: MeetingChatMessage) -> dict[str, Any]:
+    """Render a stored message for the wire.
+
+    The body is passed through as plain text. It is never marked safe, never
+    re-encoded, and never interpreted here, so a client that renders it as text
+    cannot be made to execute it.
+    """
+    return {
+        "id": message.id,
+        "user_id": message.user_id,
+        "participant_id": message.participant_id,
+        "sender_name": message.sender_name,
+        "body": message.body,
+        "created_at": message.created_at.isoformat() if message.created_at else None,
+    }
+
+
+async def _handle_chat(
+    connection: SignalingConnection,
+    message: ChatMessage,
+    session_factory: sessionmaker[Session],
+) -> None:
+    """Persist one chat message and fan it out to the whole room.
+
+    The sender is re-authorised against the database on every send rather than
+    trusted from the handshake, so a participant removed mid-meeting stops being
+    able to post. Persistence runs in a worker thread: it is blocking I/O and
+    must not stall the event loop that is relaying this participant's media.
+    """
+    try:
+        stored = await asyncio.to_thread(
+            _persist_chat, session_factory, connection.meeting_id, connection.user_id, message.body
+        )
+    except AppError as error:
+        await hub.send(
+            connection,
+            {"type": "error", "code": error.code, "message": error.message},
+        )
+        return
+    except Exception:
+        # The message text is deliberately absent from this log.
+        logger.exception("Chat send failed", extra={"meeting_id": connection.meeting_id})
+        await hub.send(
+            connection,
+            {
+                "type": "error",
+                "code": "CHAT_UNAVAILABLE",
+                "message": "Your message could not be sent",
+            },
+        )
+        return
+
+    await hub.broadcast(
+        connection.meeting_id,
+        {"type": "chat", "message": _describe_chat(stored)},
+    )
+
+
+def _persist_chat(
+    session_factory: sessionmaker[Session],
+    meeting_id: str,
+    user_id: str,
+    body: str,
+) -> MeetingChatMessage:
+    with session_factory() as session:
+        return ChatService(session).post_message(meeting_id, user_id=user_id, raw_body=body)
 
 
 async def _relay(

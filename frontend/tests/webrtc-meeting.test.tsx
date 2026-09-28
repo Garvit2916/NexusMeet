@@ -1,6 +1,6 @@
 import { act, renderHook, waitFor } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
-import { useWebRTCMeeting } from "@/hooks/use-webrtc-meeting";
+import { mergeChatMessage, useWebRTCMeeting } from "@/hooks/use-webrtc-meeting";
 
 /** Minimal stand-in for a browser MediaStreamTrack. */
 class FakeTrack {
@@ -671,3 +671,191 @@ describe("useWebRTCMeeting", () => {
     expect(connections[0].closed).toBe(true);
   });
 });
+
+function chat(overrides: Record<string, unknown> = {}) {
+  return {
+    id: 1,
+    user_id: "usr_conn-b",
+    participant_id: 2,
+    sender_name: "Peer conn-b",
+    body: "hello room",
+    created_at: "2026-01-01T10:00:00Z",
+    ...overrides,
+  };
+}
+
+describe("useWebRTCMeeting chat", () => {
+  it("appends a broadcast message to the transcript", async () => {
+    const { view, socket } = await connect();
+    act(() => socket.emit({ type: "chat", message: chat() }));
+    await waitFor(() => expect(view.result.current.chatMessages).toHaveLength(1));
+    expect(view.result.current.chatMessages[0]).toMatchObject({
+      id: 1,
+      userId: "usr_conn-b",
+      senderName: "Peer conn-b",
+      body: "hello room",
+    });
+  });
+
+  it("sends a normalised chat frame and reports success", async () => {
+    const { view, socket } = await connect();
+    act(() => socket.emit({ type: "welcome", self: peer("conn-a"), peers: [] }));
+
+    let sent = false;
+    act(() => {
+      sent = view.result.current.sendChatMessage("  too    many  spaces  ");
+    });
+    expect(sent).toBe(true);
+    expect(socket.sent).toContainEqual({ type: "chat", body: "too many spaces" });
+  });
+
+  it("refuses a blank message without sending", async () => {
+    const { view, socket } = await connect();
+    act(() => socket.emit({ type: "welcome", self: peer("conn-a"), peers: [] }));
+    const before = socket.sent.length;
+
+    let sent = true;
+    act(() => {
+      sent = view.result.current.sendChatMessage("   \u200b  ");
+    });
+    expect(sent).toBe(false);
+    expect(socket.sent).toHaveLength(before);
+  });
+
+  it("does not append a message optimistically, so ids stay server-owned", async () => {
+    const { view, socket } = await connect();
+    act(() => socket.emit({ type: "welcome", self: peer("conn-a"), peers: [] }));
+    act(() => {
+      view.result.current.sendChatMessage("sent but not yet confirmed");
+    });
+    expect(view.result.current.chatMessages).toHaveLength(0);
+  });
+
+  it("replays the welcome history and ignores a duplicate id", async () => {
+    const { view, socket } = await connect();
+    act(() =>
+      socket.emit({
+        type: "welcome",
+        self: peer("conn-a"),
+        peers: [],
+        ice_servers: TICKET.iceServers,
+        messages: [chat({ id: 1 }), chat({ id: 2, body: "second" })],
+      }),
+    );
+    await waitFor(() => expect(view.result.current.chatMessages).toHaveLength(2));
+
+    // A reconnect replays the tail of the transcript; the ids must not duplicate.
+    act(() =>
+      socket.emit({
+        type: "welcome",
+        self: peer("conn-a"),
+        peers: [],
+        ice_servers: TICKET.iceServers,
+        messages: [chat({ id: 2, body: "second" })],
+      }),
+    );
+    await waitFor(() => expect(view.result.current.chatMessages).toHaveLength(2));
+    expect(view.result.current.chatMessages[1].body).toBe("second");
+  });
+
+  it("keeps the transcript bounded", async () => {
+    const { view, socket } = await connect();
+    act(() => socket.emit({ type: "welcome", self: peer("conn-a"), peers: [] }));
+    for (let id = 1; id <= 260; id += 1) {
+      act(() => socket.emit({ type: "chat", message: chat({ id, body: `message ${id}` }) }));
+    }
+    await waitFor(() => expect(view.result.current.chatMessages.length).toBeLessThanOrEqual(200));
+    // The newest messages are the ones kept.
+    expect(view.result.current.chatMessages.at(-1)?.body).toBe("message 260");
+  });
+
+  it("drops a malformed chat frame without losing the transcript", async () => {
+    const { view, socket } = await connect();
+    act(() => socket.emit({ type: "chat", message: chat() }));
+    await waitFor(() => expect(view.result.current.chatMessages).toHaveLength(1));
+
+    act(() => socket.emit({ type: "chat", message: { id: 0, body: "" } }));
+    expect(view.result.current.chatMessages).toHaveLength(1);
+  });
+
+  it("reports a chat rejection without declaring the media connection failed", async () => {
+    const onError = vi.fn();
+    const { view, socket } = await connect({ onError });
+    act(() => socket.emit({ type: "error", code: "MESSAGE_TOO_LONG" }));
+    expect(view.result.current.chatError).toContain("too long");
+    expect(view.result.current.protocolError).toBeNull();
+    expect(onError).not.toHaveBeenCalled();
+    expect(view.result.current.status).toBe("connected");
+  });
+
+  it("clears a chat error on request", async () => {
+    const { view, socket } = await connect();
+    act(() => socket.emit({ type: "error", code: "CHAT_UNAVAILABLE" }));
+    expect(view.result.current.chatError).toBeTruthy();
+    act(() => view.result.current.clearChatError());
+    expect(view.result.current.chatError).toBeNull();
+  });
+
+  it("clears a chat error as soon as a new message is attempted", async () => {
+    const { view, socket } = await connect();
+    act(() => socket.emit({ type: "welcome", self: peer("conn-a"), peers: [] }));
+    act(() => socket.emit({ type: "error", code: "MESSAGE_EMPTY" }));
+    expect(view.result.current.chatError).toBeTruthy();
+    act(() => {
+      view.result.current.sendChatMessage("retry");
+    });
+    expect(view.result.current.chatError).toBeNull();
+  });
+
+  it("clears the transcript when the user leaves the room", async () => {
+    FakeSocket.instances = [];
+    const view = renderHook(
+      ({ enabled }: { enabled: boolean }) =>
+        useWebRTCMeeting({
+          meetingId: "room-1",
+          enabled,
+          localStream: null,
+          createSocket: (url) => new FakeSocket(url) as unknown as WebSocket,
+          createPeerConnection: () => new FakePeerConnection() as unknown as RTCPeerConnection,
+          createMediaStream: () => new FakeStream() as unknown as MediaStream,
+          requestTicket: async () => TICKET,
+        }),
+      { initialProps: { enabled: true } },
+    );
+    await waitFor(() => expect(FakeSocket.instances).toHaveLength(1));
+    act(() => FakeSocket.instances[0].open());
+    act(() => FakeSocket.instances[0].emit({ type: "chat", message: chat() }));
+    await waitFor(() => expect(view.result.current.chatMessages).toHaveLength(1));
+
+    // Leaving and rejoining must not resurrect the previous transcript.
+    view.rerender({ enabled: false });
+    await waitFor(() => expect(view.result.current.chatMessages).toHaveLength(0));
+  });
+});
+
+describe("mergeChatMessage", () => {
+  it("appends an unseen message", () => {
+    const first = { ...parseable(1) };
+    const merged = mergeChatMessage([], first);
+    expect(merged).toHaveLength(1);
+    expect(merged[0].id).toBe(1);
+  });
+
+  it("replaces a message with the same id", () => {
+    const current = [parseable(1), parseable(2)];
+    const merged = mergeChatMessage(current, { ...parseable(2), body: "edited" });
+    expect(merged).toHaveLength(2);
+    expect(merged[1].body).toBe("edited");
+  });
+});
+
+function parseable(id: number) {
+  return {
+    id,
+    userId: "usr_a",
+    participantId: 1,
+    senderName: "Peer A",
+    body: `message ${id}`,
+    createdAt: "2026-01-01T10:00:00Z",
+  };
+}

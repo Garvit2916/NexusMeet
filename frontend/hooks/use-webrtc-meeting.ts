@@ -4,9 +4,11 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { meetingService } from "@/services/meeting-service";
 import {
   buildSocketUrl,
+  normalizeChatDraft,
   resolveIceServers,
   shouldInitiateOffer,
   SIGNALING_ERROR_MESSAGES,
+  type ChatMessage,
   type MediaStateUpdate,
   type RemoteParticipant,
   type SignalingPeer,
@@ -85,6 +87,63 @@ type WebRTCMeetingOptions = {
   }>;
 };
 
+/** Cap on the transcript held in memory, matching the server's retention. */
+const MAX_CHAT_HISTORY = 200;
+
+/**
+ * Error codes that concern one chat message rather than the media session.
+ * These must not be shown as a connection failure.
+ */
+const CHAT_ERROR_CODES = new Set([
+  "MESSAGE_EMPTY",
+  "MESSAGE_TOO_LONG",
+  "CHAT_ACCESS_DENIED",
+  "CHAT_UNAVAILABLE",
+]);
+
+/**
+ * Parse a chat frame from the socket.
+ *
+ * Every field is coerced defensively: a malformed frame should cost one message,
+ * not the transcript, and the rendered list is keyed on the server-assigned id.
+ */
+function parseChatMessage(raw: unknown): ChatMessage | null {
+  if (!raw || typeof raw !== "object") return null;
+  const item = raw as Record<string, unknown>;
+  const id = Number(item.id);
+  const body = typeof item.body === "string" ? item.body : "";
+  if (!Number.isFinite(id) || id <= 0 || !body) return null;
+  return {
+    id,
+    userId: String(item.user_id ?? ""),
+    participantId: Number(item.participant_id ?? 0),
+    senderName: String(item.sender_name ?? "Guest"),
+    body,
+    createdAt: String(item.created_at ?? ""),
+  };
+}
+
+/**
+ * Merge an incoming message into the transcript.
+ *
+ * Replaces rather than appends when the id is already present, which is what
+ * makes a reconnect that replays the welcome buffer idempotent instead of
+ * duplicating the last stretch of conversation.
+ */
+export function mergeChatMessage(
+  current: ChatMessage[],
+  incoming: ChatMessage,
+): ChatMessage[] {
+  const existing = current.findIndex((item) => item.id === incoming.id);
+  if (existing === -1) {
+    const next = [...current, incoming];
+    return next.length > MAX_CHAT_HISTORY ? next.slice(next.length - MAX_CHAT_HISTORY) : next;
+  }
+  const next = [...current];
+  next[existing] = incoming;
+  return next;
+}
+
 function parsePeer(raw: Record<string, unknown>): SignalingPeer {
   return {
     connectionId: String(raw.connection_id ?? ""),
@@ -135,6 +194,8 @@ export function useWebRTCMeeting({
   const [remoteParticipants, setRemoteParticipants] = useState<RemoteParticipant[]>([]);
   const [mutedByHost, setMutedByHost] = useState(false);
   const [protocolError, setProtocolError] = useState<string | null>(null);
+  const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
+  const [chatError, setChatError] = useState<string | null>(null);
 
   const peersRef = useRef<Map<string, PeerEntry>>(new Map());
   /**
@@ -653,6 +714,23 @@ export function useWebRTCMeeting({
             }
           }
           publishPeers();
+          // A welcome replays the recent transcript, so a peer that joins late or
+          // reconnects lands in the existing conversation rather than a blank
+          // panel. Ids are already unique, so merging is idempotent.
+          const replay = (message.messages ?? []) as unknown[];
+          if (Array.isArray(replay) && replay.length) {
+            setChatMessages((current) =>
+              replay.reduce<ChatMessage[]>((acc, raw) => {
+                const parsed = parseChatMessage(raw);
+                return parsed ? mergeChatMessage(acc, parsed) : acc;
+              }, current),
+            );
+          }
+          break;
+        }
+        case "chat": {
+          const parsed = parseChatMessage(message.message);
+          if (parsed) setChatMessages((current) => mergeChatMessage(current, parsed));
           break;
         }
         case "peer-joined": {
@@ -772,9 +850,17 @@ export function useWebRTCMeeting({
           break;
         }
         case "error": {
+          const code = String(message.code);
           const text =
-            SIGNALING_ERROR_MESSAGES[String(message.code)] ??
-            "The signaling server reported a problem.";
+            SIGNALING_ERROR_MESSAGES[code] ?? "The signaling server reported a problem.";
+          // A rejected message is not a media failure. Surfacing it as a protocol
+          // error would tear down the room's UI over a mistyped chat message, so
+          // chat codes are reported to the panel and everything else stays fatal
+          // to the connection.
+          if (CHAT_ERROR_CODES.has(code)) {
+            setChatError(text);
+            break;
+          }
           setProtocolError(text);
           handlersRef.current.onError?.(text);
           break;
@@ -918,6 +1004,10 @@ export function useWebRTCMeeting({
       reconnectAttemptRef.current = 0;
       setStatus("idle");
       setRemoteParticipants([]);
+      // A transcript is per-visit. Keeping it across a leave/rejoin would show
+      // messages from a room the user is no longer in.
+      setChatMessages([]);
+      setChatError(null);
     };
   }, [closeAllPeers, connect, enabled, teardownSocket]);
 
@@ -933,6 +1023,27 @@ export function useWebRTCMeeting({
     [send],
   );
 
+  /**
+   * Send one chat message.
+   *
+   * The draft is normalised here, using the same rule as the server, so a blank
+   * or whitespace-only message is refused without a round trip. Nothing is
+   * appended locally: the sender receives its own message back through the
+   * broadcast, which is the only way the list can be sure it matches what was
+   * actually stored.
+   */
+  const sendChatMessage = useCallback(
+    (draft: string): boolean => {
+      const body = normalizeChatDraft(draft);
+      if (!body) return false;
+      setChatError(null);
+      return send({ type: "chat", body });
+    },
+    [send],
+  );
+
+  const clearChatError = useCallback(() => setChatError(null), []);
+
   return useMemo(
     () => ({
       remoteParticipants,
@@ -941,7 +1052,21 @@ export function useWebRTCMeeting({
       protocolError,
       peerCount: remoteParticipants.length,
       publishMediaState,
+      chatMessages,
+      chatError,
+      sendChatMessage,
+      clearChatError,
     }),
-    [mutedByHost, protocolError, publishMediaState, remoteParticipants, status],
+    [
+      chatError,
+      chatMessages,
+      clearChatError,
+      mutedByHost,
+      protocolError,
+      publishMediaState,
+      remoteParticipants,
+      sendChatMessage,
+      status,
+    ],
   );
 }

@@ -6,6 +6,7 @@ from typing import Annotated
 from fastapi import APIRouter, Body, Depends, Path, Query, Request, status
 
 from app.api.dependencies import (
+    get_chat_service,
     get_current_user,
     get_meeting_service,
     get_optional_current_user,
@@ -19,6 +20,7 @@ from app.models.user import User
 from app.realtime.dispatch import dispatch_to_signaling
 from app.realtime.hub import hub
 from app.realtime.tickets import ice_servers, issue_ticket, resolve_ws_url
+from app.schemas.chat import ChatMessageResponse
 from app.schemas.common import SuccessEnvelope
 from app.schemas.meeting import (
     CreateInstantMeetingRequest,
@@ -34,6 +36,7 @@ from app.schemas.participant import (
     ParticipantResponse,
 )
 from app.schemas.signaling import SignalingTicketResponse
+from app.services.chat_service import CHAT_HISTORY_LIMIT, CHAT_HISTORY_MAX_LIMIT, ChatService
 from app.services.meeting_service import MeetingService
 from app.utils.ids import (
     MEETING_ID_MAX_LENGTH,
@@ -190,9 +193,7 @@ def create_signaling_ticket(
             "Media is not available because the server is missing its signaling secret",
         )
 
-    ticket, expires_at = issue_ticket(
-        settings, user_id=current_user.id, meeting_id=meeting.id
-    )
+    ticket, expires_at = issue_ticket(settings, user_id=current_user.id, meeting_id=meeting.id)
     ttl = max(expires_at - int(utc_now().timestamp()), 0)
     return SuccessEnvelope(
         data=SignalingTicketResponse(
@@ -203,6 +204,26 @@ def create_signaling_ticket(
             max_participants=settings.max_webrtc_participants,
         )
     )
+
+
+@router.get(
+    "/{meeting_id}/messages",
+    response_model=SuccessEnvelope[list[ChatMessageResponse]],
+)
+def list_chat_messages(
+    meeting_id: MeetingId,
+    limit: Annotated[int, Query(ge=1, le=CHAT_HISTORY_MAX_LIMIT)] = CHAT_HISTORY_LIMIT,
+    current_user: User = Depends(get_current_user),
+    chat: ChatService = Depends(get_chat_service),
+) -> SuccessEnvelope[list[ChatMessageResponse]]:
+    """Return the tail of this meeting's chat, oldest first.
+
+    This is the same replay buffer the socket sends in its welcome frame, exposed
+    over REST so a client can page in older messages or recover a transcript
+    without re-establishing the socket.
+    """
+    messages = chat.list_messages(meeting_id, user_id=current_user.id, limit=limit)
+    return SuccessEnvelope(data=[ChatMessageResponse.model_validate(item) for item in messages])
 
 
 @router.post("/{meeting_id}/start", response_model=SuccessEnvelope[MeetingDetails])
@@ -221,12 +242,12 @@ def end_meeting(
     current_user: User = Depends(require_meeting_host),
     service: MeetingService = Depends(get_meeting_service),
 ) -> SuccessEnvelope[MeetingDetails]:
-    details = SuccessEnvelope(data=service.end(meeting_id, current_user))
+    details: SuccessEnvelope[MeetingDetails] = SuccessEnvelope(
+        data=service.end(meeting_id, current_user)
+    )
     # The REST response already carries the ended status; the broadcast exists so
     # each client stops its tracks and leaves the room without polling.
-    dispatch_to_signaling(
-        request, hub.notify_and_close(meeting_id, {"type": "meeting-ended"})
-    )
+    dispatch_to_signaling(request, hub.notify_and_close(meeting_id, {"type": "meeting-ended"}))
     return details
 
 
@@ -237,12 +258,11 @@ def cancel_meeting(
     current_user: User = Depends(require_meeting_host),
     service: MeetingService = Depends(get_meeting_service),
 ) -> SuccessEnvelope[MeetingDetails]:
-    details = SuccessEnvelope(data=service.cancel(meeting_id, current_user))
-    dispatch_to_signaling(
-        request, hub.notify_and_close(meeting_id, {"type": "meeting-ended"})
+    details: SuccessEnvelope[MeetingDetails] = SuccessEnvelope(
+        data=service.cancel(meeting_id, current_user)
     )
+    dispatch_to_signaling(request, hub.notify_and_close(meeting_id, {"type": "meeting-ended"}))
     return details
-
 
 
 @router.post("/{meeting_id}/join", response_model=SuccessEnvelope[MeetingDetails])
@@ -302,9 +322,7 @@ def set_participant_mute(
     service: MeetingService = Depends(get_meeting_service),
 ) -> SuccessEnvelope[ParticipantResponse]:
     muted = payload.muted if payload is not None else True
-    participant = service.mute_participant(
-        meeting_id, current_user, participant_id, muted=muted
-    )
+    participant = service.mute_participant(meeting_id, current_user, participant_id, muted=muted)
     # The database is authoritative, but the target's socket has to disable the
     # real audio track right away, so the state is pushed over signaling too.
     dispatch_to_signaling(
@@ -334,11 +352,7 @@ def remove_participant(
     # down its peer connections, stops its tracks, and cannot rejoin the socket.
     dispatch_to_signaling(
         request,
-        hub.send_to_user(
-            meeting_id, participant.user_id, {"type": "participant-removed"}
-        ),
+        hub.send_to_user(meeting_id, participant.user_id, {"type": "participant-removed"}),
     )
-    dispatch_to_signaling(
-        request, hub.disconnect_user(meeting_id, participant.user_id)
-    )
+    dispatch_to_signaling(request, hub.disconnect_user(meeting_id, participant.user_id))
     return SuccessEnvelope(data=participant)
