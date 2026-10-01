@@ -406,14 +406,24 @@ A TURN entry with a populated `username` and `credential` confirms the environme
    | `CORS_ORIGINS` | `https://<app>.vercel.app` | Required for the WebSocket handshake origin check |
    | `WS_TICKET_SECRET` | long random string | Signs signaling tickets; never reuse the development value |
    | `PUBLIC_WS_URL` | `wss://<api-service>.onrender.com` | Absolute socket URL handed to the browser |
-   | `STUN_URLS` | comma-separated STUN URLs | ICE servers advertised to clients |
+   | `STUN_URLS` | comma-separated STUN URLs | ICE servers advertised to clients; keep it in sync with `render.yaml` |
    | `TURN_URL` | `turn:<relay>:3478,turns:<relay>:443?transport=tcp` | Relay the browser can fall back to; see **NAT traversal** |
    | `TURN_USERNAME` | provider username | Relay authentication |
    | `TURN_CREDENTIAL` | provider credential | Relay authentication; rotate if ever disclosed |
 
 TURN is not optional for a real deployment, only for a same-network demo. Enter the three TURN values in the Render dashboard and redeploy; they are read at boot, so a change without a restart has no effect. `render.yaml` declares them as `sync: false`, which means Render never reads them from the repository and the blueprint cannot leak them into Git.
 
-The proxy is deliberate. With the frontend on `*.vercel.app` and the API on `*.onrender.com` the origins are cross-site, so a `SameSite=Lax` session cookie would be dropped by the browser and every authenticated request would fail. Forwarding `/api/*` through Next.js keeps the cookie first-party, so authentication works in any browser without weakening cookie rules. Leave `API_ORIGIN` unset locally and the frontend calls `http://localhost:8000/api/v1` directly.
+Verify what actually shipped rather than trusting the dashboard. Ask the API for a ticket and read the `ice_servers` it returns:
+
+```bash
+curl -X POST https://<api-service>.onrender.com/api/v1/meetings/<id>/ws-ticket -b cookies.txt
+```
+
+Each STUN URL is advertised as its own entry, so `stun:one,stun:two` yields two objects rather than one combined list, and every TURN entry carries `username` and `credential`. A dashboard variable can drift out of sync with `render.yaml`, and because these are read at boot a corrected value still needs a redeploy to take effect. STUN only discovers public addresses; if `ice_servers` has no TURN entry, media will fail between browsers on genuinely different networks no matter how long they retry.
+
+The proxy is deliberate. With the frontend on `*.vercel.app` and the API on `*.onrender.com` the origins are cross-site, so a `SameSite=Lax` session cookie would be dropped by the browser and every authenticated request would fail. Forwarding `/api/*` through Next.js keeps the cookie first-party, so authentication works in any browser without weakening cookie rules.
+
+Use the same proxy setup locally. `frontend/.env.local` sets `API_ORIGIN=http://localhost:8000` and `NEXT_PUBLIC_API_URL=/api/v1`, so the browser only ever calls its own origin. Do not point `NEXT_PUBLIC_API_URL` straight at `http://localhost:8000`: browsers treat `localhost`, `127.0.0.1`, and a LAN address as three different sites, so whichever host you did not use to sign in will drop the session cookie and appear to sign you out at random. The proxy makes the cookie first-party on all of them.
 
 The Vercel rewrite covers REST only. The WebSocket connects straight to `PUBLIC_WS_URL` on the API host, so that host must terminate WebSocket upgrades and its URL must be listed in `CORS_ORIGINS`. Two deployment mistakes are worth calling out because they look identical in the browser: a build without the signaling route returns `404` on `ws-ticket`, and a missing CORS entry returns `400` on the CORS preflight. Both surface in the room as a media error with zero peers, because no socket is ever opened.
 
