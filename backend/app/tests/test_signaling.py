@@ -367,20 +367,39 @@ def test_turn_credentials_are_only_exposed_when_configured() -> None:
 def test_turn_aliases_and_multiple_urls_are_honoured() -> None:
     # Providers document `TURN_URLS`/`TURN_PASSWORD`, so both spellings must
     # work. A typo would otherwise silently leave every call STUN-only.
+    # STUN is pinned here so the assertion does not depend on the ambient
+    # STUN_URLS from the local .env.
     plural = ice_servers(
         Settings(
             ws_ticket_secret="s",
             turn_urls="turn:one.example.com:3478,turns:two.example.com:5349",
             turn_username="u",
             turn_password="p",
+            stun_urls="stun:stun.example.com:19302",
         )
     )
     assert plural[0]["urls"] == ["turn:one.example.com:3478", "turns:two.example.com:5349"]
     assert plural[0]["username"] == "u"
     assert plural[0]["credential"] == "p"
 
-    # STUN is still advertised after TURN so a direct path is preferred.
-    assert plural[-1]["urls"] == ["stun:stun.l.google.com:19302"]
+    # STUN is still advertised after TURN so a direct path is preferred, and it
+    # carries no credential because it needs none.
+    assert plural[-1] == {"urls": ["stun:stun.example.com:19302"]}
+
+
+def test_multiple_stun_urls_are_each_advertised_separately() -> None:
+    # Several STUN URLs must not be collapsed into one entry, or a browser
+    # given a joined list would treat it as a single unreachable server.
+    servers = ice_servers(
+        Settings(
+            ws_ticket_secret="s",
+            stun_urls="stun:one.example.com:3478, stun:two.example.com:3478",
+        )
+    )
+    assert servers == [
+        {"urls": ["stun:one.example.com:3478"]},
+        {"urls": ["stun:two.example.com:3478"]},
+    ]
 
 
 def test_turn_is_not_advertised_without_every_credential() -> None:
