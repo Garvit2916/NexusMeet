@@ -45,6 +45,11 @@ export function MeetingRoom({ meetingId }: { meetingId: string }) {
   const [isEnding, setIsEnding] = useState(false);
   const [endedByHost, setEndedByHost] = useState(false);
   const [removedByHost, setRemovedByHost] = useState(false);
+  // `useLocalMedia` returns a fresh object on every render, so the media object
+  // itself must never be an effect dependency. Its callbacks are stable, and
+  // depending on them keeps the "meeting ended" effect from re-running forever.
+  const stopMedia = media.stop;
+  const setMicEnabled = media.setMicEnabled;
   const joinedRef = useRef(false);
   const leaveSentRef = useRef(false);
   const wasInActiveListRef = useRef(false);
@@ -59,15 +64,15 @@ export function MeetingRoom({ meetingId }: { meetingId: string }) {
     onHostMuteChange: (muted) => {
       // The server pushed a host mute over the socket, so mirror it into local
       // state instead of letting the next toggle silently re-enable the track.
-      media.setMicEnabled(!muted);
+      setMicEnabled(!muted);
     },
     onRemoved: () => {
       setRemovedByHost(true);
-      media.stop();
+      stopMedia();
     },
     onEnded: () => {
       setEndedByHost(true);
-      media.stop();
+      stopMedia();
     },
     onError: (message) => setRoomError(message),
   });
@@ -82,13 +87,22 @@ export function MeetingRoom({ meetingId }: { meetingId: string }) {
       leaveSentRef.current = true;
       try {
         await meetingService.leaveMeeting(meetingId);
-      } catch {
-        setRoomError("The room could not be updated, but your local media is stopping.");
+      } catch (leaveError) {
+        // The host ending the meeting already marks everyone left, so the
+        // follow-up leave call is a guaranteed 409. Treat it as done instead of
+        // showing an error the participant cannot act on.
+        const alreadyClosed =
+          leaveError instanceof ApiError &&
+          leaveError.status === 409 &&
+          (leaveError.code === "INVALID_STATUS_TRANSITION" || leaveError.code === "NOT_ACTIVE_PARTICIPANT");
+        if (!alreadyClosed) {
+          setRoomError("The room could not be updated, but your local media is stopping.");
+        }
       }
     }
-    media.stop();
+    stopMedia();
     router.replace(`/meeting/${meetingId}`);
-  }, [meetingId, media, router]);
+  }, [meetingId, stopMedia, router]);
 
   useEffect(() => {
     if (meeting) setRoomMeeting(meeting);
@@ -110,7 +124,7 @@ export function MeetingRoom({ meetingId }: { meetingId: string }) {
     if (phase !== "room" || !roomMeeting) return;
     if (roomMeeting.status === "ended") {
       setEndedByHost(true);
-      media.stop();
+      stopMedia();
       return;
     }
     if (user) {
@@ -126,7 +140,7 @@ export function MeetingRoom({ meetingId }: { meetingId: string }) {
         setRemovedByHost(true);
       }
     }
-  }, [phase, roomMeeting, media, user]);
+  }, [phase, roomMeeting, user, stopMedia]);
 
   useEffect(() => () => {
     if (joinedRef.current && !leaveSentRef.current) {
@@ -181,7 +195,7 @@ export function MeetingRoom({ meetingId }: { meetingId: string }) {
   }
 
   function leaveBeforeJoin() {
-    media.stop();
+    stopMedia();
     router.replace(`/meeting/${meetingId}`);
   }
 
@@ -287,7 +301,7 @@ export function MeetingRoom({ meetingId }: { meetingId: string }) {
       setRoomMeeting(endedMeeting);
       setEndDialogOpen(false);
       setEndedByHost(true);
-      media.stop();
+      stopMedia();
     } catch (requestError) {
       handleRequestError(requestError, "We could not end this meeting for everyone.");
     } finally {
@@ -359,7 +373,7 @@ export function MeetingRoom({ meetingId }: { meetingId: string }) {
             <button
               type="button"
               onClick={() => {
-                media.stop();
+                stopMedia();
                 router.replace(`/meeting/${meetingId}`);
               }}
               className="self-start font-semibold text-mint underline sm:self-auto"
