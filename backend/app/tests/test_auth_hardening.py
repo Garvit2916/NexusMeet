@@ -17,9 +17,7 @@ from app.tests.conftest import DEFAULT_USER_EMAIL, DEFAULT_USER_PASSWORD, login
 
 
 class TestLoginRateLimiting:
-    def test_repeated_failures_eventually_lock_the_pair(
-        self, anonymous_client: TestClient
-    ) -> None:
+    def test_repeated_failures_eventually_lock_the_pair(self, anonymous_client: TestClient) -> None:
         for _ in range(5):
             response = anonymous_client.post(
                 "/api/v1/auth/login",
@@ -34,9 +32,7 @@ class TestLoginRateLimiting:
         assert locked.status_code == 401
         assert locked.json()["error"]["code"] == "INVALID_CREDENTIALS"
 
-    def test_a_locked_attempt_returns_retry_after(
-        self, anonymous_client: TestClient
-    ) -> None:
+    def test_a_locked_attempt_returns_retry_after(self, anonymous_client: TestClient) -> None:
         for _ in range(6):
             response = anonymous_client.post(
                 "/api/v1/auth/login",
@@ -147,9 +143,7 @@ class TestPasswordChange:
         assert response.status_code == 401
         assert response.json()["error"]["code"] == "UNAUTHENTICATED"
 
-    def test_change_password_rejects_a_wrong_current_password(
-        self, client: TestClient
-    ) -> None:
+    def test_change_password_rejects_a_wrong_current_password(self, client: TestClient) -> None:
         response = client.post(
             "/api/v1/auth/change-password",
             json={"current_password": "not-my-password", "new_password": "brand-new-pass"},
@@ -157,9 +151,7 @@ class TestPasswordChange:
         assert response.status_code == 401
         assert "current password" in response.json()["error"]["message"].lower()
 
-    def test_change_password_rejects_reusing_the_same_password(
-        self, client: TestClient
-    ) -> None:
+    def test_change_password_rejects_reusing_the_same_password(self, client: TestClient) -> None:
         response = client.post(
             "/api/v1/auth/change-password",
             json={

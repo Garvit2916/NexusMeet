@@ -63,15 +63,11 @@ def test_bootstrap_stamp_never_moves_backwards(tmp_path: Path) -> None:
     initialize_database(engine)
 
     with engine.begin() as connection:
-        connection.execute(
-            text("UPDATE alembic_version SET version_num = '9999_future_revision'")
-        )
+        connection.execute(text("UPDATE alembic_version SET version_num = '9999_future_revision'"))
 
     initialize_database(engine)
 
-    stamped = engine.connect().execute(
-        text("SELECT version_num FROM alembic_version")
-    ).scalar_one()
+    stamped = engine.connect().execute(text("SELECT version_num FROM alembic_version")).scalar_one()
     assert stamped == "9999_future_revision"
 
 
@@ -87,18 +83,11 @@ def test_bootstrap_advances_a_stale_stamp_forward(tmp_path: Path) -> None:
     initialize_database(engine)
 
     with engine.begin() as connection:
-        connection.execute(
-            text(
-                "UPDATE alembic_version "
-                "SET version_num = '0001_initial'"
-            )
-        )
+        connection.execute(text("UPDATE alembic_version SET version_num = '0001_initial'"))
 
     initialize_database(engine)
 
-    stamped = engine.connect().execute(
-        text("SELECT version_num FROM alembic_version")
-    ).scalar_one()
+    stamped = engine.connect().execute(text("SELECT version_num FROM alembic_version")).scalar_one()
     assert stamped == CURRENT_SCHEMA_REVISION
 
 
