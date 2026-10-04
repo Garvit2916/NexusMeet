@@ -131,6 +131,75 @@ describe("useLocalMedia", () => {
     expect(result.current.error).toMatch(/camera access was blocked/i);
   });
 
+  it("says the camera is in use by another app instead of calling it blocked", async () => {
+    stubMediaDevices((constraints) =>
+      constraints.video
+        ? Promise.reject(new DOMException("busy", "NotReadableError"))
+        : Promise.resolve(stream("audio")),
+    );
+
+    const { result } = renderHook(() => useLocalMedia());
+    await act(async () => {
+      await result.current.start();
+    });
+
+    expect(result.current.isStarting).toBe(false);
+    expect(result.current.stream).not.toBeNull();
+    expect(result.current.cameraEnabled).toBe(false);
+    expect(result.current.error).toMatch(/camera is already in use/i);
+    expect(result.current.error).not.toMatch(/blocked/i);
+  });
+
+  it("treats Chromium's TrackStartError as the same busy-device case", async () => {
+    stubMediaDevices((constraints) =>
+      constraints.video
+        ? Promise.reject(new DOMException("busy", "TrackStartError"))
+        : Promise.resolve(stream("audio")),
+    );
+
+    const { result } = renderHook(() => useLocalMedia());
+    await act(async () => {
+      await result.current.start();
+    });
+
+    expect(result.current.error).toMatch(/camera is already in use/i);
+  });
+
+  it("names the microphone when the microphone is the busy device", async () => {
+    // Asking for both devices fails, then video alone succeeds, so the
+    // warning has to come from the audio-only retry.
+    stubMediaDevices((constraints) => {
+      if (constraints.video && constraints.audio) {
+        return Promise.reject(new DOMException("busy", "NotReadableError"));
+      }
+      return constraints.video
+        ? Promise.resolve(stream("video"))
+        : Promise.reject(new DOMException("busy", "NotReadableError"));
+    });
+
+    const { result } = renderHook(() => useLocalMedia());
+    await act(async () => {
+      await result.current.start();
+    });
+
+    expect(result.current.cameraEnabled).toBe(true);
+    expect(result.current.micEnabled).toBe(false);
+    expect(result.current.error).toMatch(/microphone is already in use/i);
+  });
+
+  it("still opens nothing when both devices are busy", async () => {
+    stubMediaDevices(() => Promise.reject(new DOMException("busy", "NotReadableError")));
+
+    const { result } = renderHook(() => useLocalMedia());
+    await act(async () => {
+      await result.current.start();
+    });
+
+    expect(result.current.stream).toBeNull();
+    expect(result.current.isStarting).toBe(false);
+    expect(result.current.error).toMatch(/already in use/i);
+  });
+
   it("enables both devices when access is granted", async () => {
     stubMediaDevices(() => Promise.resolve(stream("audio", "video")));
 

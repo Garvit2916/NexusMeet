@@ -24,9 +24,28 @@ const initialState: LocalMediaState = {
   permission: "prompt",
 };
 
-function messageFor(error: unknown, fallback: string) {
+type MediaDeviceLabel = "camera" | "microphone";
+
+/**
+ * An operating system hands a camera to one application at a time, so a second
+ * site or tab fails with `NotReadableError` (`TrackStartError` on Chromium).
+ * The device is busy, not blocked, and the two need different advice: changing
+ * this site's permissions cannot release a camera another app is holding.
+ */
+function isDeviceBusy(error: unknown) {
+  if (!(error instanceof DOMException)) return false;
+  return error.name === "NotReadableError" || error.name === "TrackStartError";
+}
+
+function deviceBusyMessage(device?: MediaDeviceLabel) {
+  const subject = device ? `Your ${device}` : "Your camera or microphone";
+  return `${subject} is already in use by another app or website. Close the other app or browser tab that is holding it, then try again.`;
+}
+
+function messageFor(error: unknown, fallback: string, device?: MediaDeviceLabel) {
   if (error instanceof DOMException && error.name === "NotAllowedError") return fallback;
   if (error instanceof DOMException && error.name === "NotFoundError") return "No matching device was found.";
+  if (isDeviceBusy(error)) return deviceBusyMessage(device);
   return fallback;
 }
 
@@ -171,7 +190,7 @@ export function useLocalMedia() {
           setState((current) => ({ ...current, isStarting: false, stream: null, micEnabled: false, cameraEnabled: false, error: PERMISSION_PROMPT_TIMEOUT_MESSAGE }));
           return null;
         }
-        warnings.push(messageFor(error, "Camera access was blocked. You can continue without video."));
+        warnings.push(messageFor(error, "Camera access was blocked. You can continue without video.", "camera"));
       }
       try {
         audioStream = await requestDevices({ audio: { echoCancellation: true, noiseSuppression: true } });
@@ -180,7 +199,7 @@ export function useLocalMedia() {
           setState((current) => ({ ...current, isStarting: false, stream: null, micEnabled: false, cameraEnabled: false, error: PERMISSION_PROMPT_TIMEOUT_MESSAGE }));
           return null;
         }
-        warnings.push(messageFor(error, "Microphone access was blocked. You can continue with video only."));
+        warnings.push(messageFor(error, "Microphone access was blocked. You can continue with video only.", "microphone"));
       }
       const tracks = [...(videoStream?.getTracks() || []), ...(audioStream?.getTracks() || [])];
       if (!tracks.length) {
